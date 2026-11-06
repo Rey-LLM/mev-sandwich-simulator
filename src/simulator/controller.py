@@ -1,4 +1,4 @@
-"""Layers 03-06: simulation controller.
+"""Layers 03-08: simulation controller.
 
 ``SimulationController`` is the single entry point that dispatches a run to
 the mode chosen in :class:`SimulationConfig`, owns the capped worker pool
@@ -7,7 +7,9 @@ for the whole run, and returns a JSON-serialisable report. Every run adds a
 :class:`simulator.multi_hop_router.MultiHopRouter`); brutal runs add a ``pbs``
 section from :class:`simulator.block_builder.PBSSimulation` and, when
 ``private_flow_bps > 0``, a ``private_relay`` section from
-:class:`simulator.private_relay.PrivateOrderflowSimulation`.
+:class:`simulator.private_relay.PrivateOrderflowSimulation`, and, when
+``rl_rounds > 0``, a ``reinforcement`` section from
+:class:`simulator.reinforcement_engine.ReinforcementSimulation`.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from .mempool_emulator import MempoolEmulator, PendingTx
 from .multi_hop_router import MultiHopRouter
 from .parallel import WorkerPool
 from .private_relay import PrivateOrderflowSimulation
+from .reinforcement_engine import ReinforcementSimulation
 from .slippage_engine import ConcentratedPool, Pool, Position, V2Pool, V4Pool, price_to_sqrt_price_x96
 
 E18 = 10**18
@@ -66,6 +69,11 @@ class SimulationController:
                 body["pbs"] = PBSSimulation(pools, cfg).run(executor=wp).summary()
                 if cfg.private_flow_bps > 0:
                     body["private_relay"] = PrivateOrderflowSimulation(pools, cfg).run(executor=wp).summary()
+                if cfg.rl_rounds > 0:
+                    body["reinforcement"] = ReinforcementSimulation(
+                        seed=cfg.seed, rounds=cfg.rl_rounds, steps_per_shard=cfg.rl_steps_per_shard,
+                        eval_steps=cfg.rl_eval_steps, regime=cfg.rl_regime,
+                    ).run(executor=wp)
             router = MultiHopRouter(pools, cfg.native_token, cfg.router_max_hops)
             body["router"] = router.scan_cycles(executor=wp, gas_price_wei=cfg.gas_price_wei).summary()
         return {

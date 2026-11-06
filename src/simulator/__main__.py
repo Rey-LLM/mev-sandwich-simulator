@@ -27,12 +27,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="bps of user swaps routed to the private relay (brutal mode)")
     parser.add_argument("--refund", type=int, default=None, help="MEV-Share refund to users, in bps")
     parser.add_argument("--max-hops", type=int, default=None, help="router route / cycle length, 1-6")
+    parser.add_argument("--rl-rounds", type=int, default=None,
+                        help="parallel policy-iteration rounds for the RL bidding agent (brutal mode)")
+    parser.add_argument("--rl-regime", default=None, help="RL market regime: calm | volatile | extreme")
     parser.add_argument("--trace", action="store_true", help="log every sealed block's tx trace to stderr")
     args = parser.parse_args(argv)
     overrides = {k: v for k, v in {
         "seed": args.seed, "blocks": args.blocks, "txs_per_block": args.txs, "fuzz_iterations": args.fuzz,
         "layout_fuzz_iterations": args.layouts, "private_flow_bps": args.private_share,
         "mev_share_refund_bps": args.refund, "router_max_hops": args.max_hops,
+        "rl_rounds": args.rl_rounds, "rl_regime": args.rl_regime,
         "block_gas_limit": None if args.gas_limit is None else clamp_gas_limit(args.gas_limit),
     }.items() if v is not None}
     if args.trace:

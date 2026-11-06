@@ -15,6 +15,10 @@ auction with refunds, encrypted builder delivery, exposure analysis).
 Layer 06: ``multi_hop_router`` (token graph, path and cycle enumeration,
 Bellman-Ford cross-check, sequential v2 / v3 / v4 execution with combined
 slippage degradation vectors, order splitting, parallel cycle scans).
+Layer 08: ``reinforcement_engine`` (online Q-learning and policy-gradient
+bidding agents trained against competing searcher bots, exact-wei rewards,
+parallel policy iteration on the capped worker pool); ``block_builder`` gains
+competitor bots and the exact bundle eviction model.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.8.0"

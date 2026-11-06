@@ -23,6 +23,9 @@ Layer 05 adds the private relay (``private_relay``): in brutal mode
 Flashbots Protect / MEV-Share style relay, whose backrun auction and hint
 exposure matrix run on the same worker pool. Layer 06 (``multi_hop_router``)
 scans every arbitrage cycle up to ``router_max_hops`` hops in both modes.
+Layer 08 (``reinforcement_engine``) trains an online bidding agent against
+competing searcher bots for ``rl_rounds`` rounds of parallel policy
+iteration in brutal mode, sharded over the same capped worker pool.
 
 Everything runs offline on the simulator's own pool objects; no RPC or chain
 access is involved.
@@ -205,6 +208,11 @@ class SimulationConfig:
     mev_share_refund_bps: int = 9_000  # share of a winning backrun payment refunded to the user
     # Layer 06: multi-hop router.
     router_max_hops: int = 3  # longest route / cycle the router enumerates
+    # Layer 08: online reinforcement learning (0 rounds = off).
+    rl_rounds: int = 0  # parallel policy-iteration rounds
+    rl_steps_per_shard: int = 48  # environment steps each shard trains per round
+    rl_eval_steps: int = 96  # greedy evaluation steps after training
+    rl_regime: str = "volatile"  # calm | volatile | extreme
     # Multiprocessing.
     start_method: str = "spawn"
     parallel_threshold: int = 4  # fewer tasks than this run inline
@@ -229,6 +237,10 @@ class SimulationConfig:
             raise ConfigError("private_flow_bps and mev_share_refund_bps must be within [0, 10000]")
         if not 1 <= self.router_max_hops <= 6:
             raise ConfigError("router_max_hops must be within [1, 6]")
+        if self.rl_rounds < 0 or self.rl_steps_per_shard < 0 or self.rl_eval_steps < 0:
+            raise ConfigError("rl_rounds, rl_steps_per_shard and rl_eval_steps must be non-negative")
+        if self.rl_regime not in ("calm", "volatile", "extreme"):
+            raise ConfigError("rl_regime must be calm, volatile or extreme")
 
     @property
     def gas_price_wei(self) -> int:
@@ -262,6 +274,10 @@ class SimulationConfig:
             "private_flow_bps": self.private_flow_bps,
             "mev_share_refund_bps": self.mev_share_refund_bps,
             "router_max_hops": self.router_max_hops,
+            "rl_rounds": self.rl_rounds,
+            "rl_steps_per_shard": self.rl_steps_per_shard,
+            "rl_eval_steps": self.rl_eval_steps,
+            "rl_regime": self.rl_regime,
         }
 
 
@@ -275,6 +291,7 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         layout_fuzz_iterations=0,
         private_flow_bps=0,
         router_max_hops=3,
+        rl_rounds=0,
     ),
     RunMode.BRUTAL_AGGRESSIVE: dict(
         blocks=6,
@@ -285,6 +302,9 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         layout_fuzz_iterations=2_048,
         private_flow_bps=3_000,
         router_max_hops=4,
+        rl_rounds=3,
+        rl_steps_per_shard=64,
+        rl_eval_steps=128,
     ),
 }
 

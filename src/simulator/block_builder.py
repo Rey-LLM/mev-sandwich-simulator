@@ -79,7 +79,7 @@ import logging
 import random
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
@@ -1851,6 +1851,471 @@ class PBSSimulation:
         return out
 
 
+# ---------------------------------------------------------------------------
+# Layer 08: competing searchers, bundle scoring and the eviction model
+# ---------------------------------------------------------------------------
+#
+# Builders in this module rank bundles by ``value_wei / gas_used`` from a
+# top-of-block simulation (ties broken by ascending ``bundle_id``) and place
+# them first, so two bundles that target the same victim cannot both land:
+# the lower-ranked one fails with ``conflict_already_included`` (shared tx
+# hash) or reverts on its exact ``amount_out_min`` (shared pool). Displacing
+# a rival is therefore a pure ranking problem with an exact integer answer:
+#
+#     V_min = floor(S_r * G) + 1            if S_r * G is not an integer
+#     V_min = S_r * G (+1 unless we win the bundle_id tie-break) otherwise
+#
+# where ``S_r`` is the best conflicting rival's score (a Fraction) and ``G``
+# the gas our bundle uses. ``V_min - V`` extra value can be paid either as a
+# higher ``maxPriorityFeePerGas`` on the searcher's own legs (paid per gas,
+# so it rounds up to a multiple of their gas: overhead < ``g_s`` wei) or as a
+# coinbase transfer (exact to the wei). Base-fee burn is ``base_fee * G`` in
+# both cases, because gas used does not depend on fees; the model picks the
+# cheaper structure and never changes the bundle's gas footprint.
+#
+# Why static searchers lose to adaptive ones in this model:
+# * A fixed priority tip scores ``tip + victim_tip * g_v / G`` per gas no
+#   matter how large the opportunity is, so any bidder paying a share of
+#   profit outranks it on every opportunity worth more than the tip.
+# * A fixed profit share never reacts to rivals: an adaptive bidder that
+#   learns the rival's share can sit one wei above it and keep the rest.
+# * A fixed-ratio router sizes its front-run from the victim's amount, not
+#   from the victim's slippage limit, so it either leaves profit unclaimed
+#   (low score, outbid) or overshoots and makes the victim revert (dropped).
+
+
+@dataclass(frozen=True)
+class BundleScore:
+    """Top-of-block simulation result a greedy builder ranks a bundle by."""
+
+    bundle_id: str
+    included: bool
+    value_wei: int = 0
+    gas_used: int = 0
+    searcher_gas_used: int = 0
+    reason: str = ""
+
+    @property
+    def score(self) -> Fraction:
+        return Fraction(self.value_wei, max(1, self.gas_used))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "bundle_id": self.bundle_id,
+            "included": self.included,
+            "value_wei": self.value_wei,
+            "gas_used": self.gas_used,
+            "searcher_gas_used": self.searcher_gas_used,
+            "score_wei_per_gas": float(self.score),
+            "reason": self.reason,
+        }
+
+
+def bundle_payer(bundle: Bundle) -> str:
+    """Account that pays the bundle's coinbase transfer (as in :func:`execute_bundle`)."""
+    return bundle.searcher or (bundle.txs[-1].sender if bundle.txs else "")
+
+
+def score_bundle(parent: BuilderState, bundle: Bundle, base_fee: int, gas_limit: int = BLOCK_GAS_LIMIT,
+                 policy: Optional[GuardPolicy] = None) -> BundleScore:
+    """Seal ``bundle`` alone at the top of a block on ``parent`` and report its value and gas."""
+    block, _ = seal_block(parent, [bundle], base_fee, gas_limit, "scorer", "coinbase:scorer",
+                          trace=False, policy=policy, compute_root=False)
+    iid = item_id(bundle)
+    if iid not in block.included:
+        return BundleScore(bundle.bundle_id, False, reason=block.skipped.get(iid, "not_included"))
+    payer = bundle_payer(bundle)
+    own = sum(t.gas_used for t in block.txs if t.sender == payer)
+    return BundleScore(bundle.bundle_id, True, block.value_wei, block.gas_used, own)
+
+
+def bundle_pools(bundle: Bundle) -> Set[str]:
+    pools: Set[str] = set()
+    for t in bundle.txs:
+        if t.kind is TxKind.SWAP:
+            pools.update(t.route)
+        elif t.kind in (TxKind.MINT, TxKind.BURN):
+            pools.add(str(t.payload.get("pool_id", "")))
+    return pools
+
+
+def bundles_conflict(a: Bundle, b: Bundle) -> bool:
+    """True when ``a`` and ``b`` cannot both land as quoted: shared tx hash or shared pool."""
+    if set(a.tx_hashes) & set(b.tx_hashes):
+        return True
+    return bool(bundle_pools(a) & bundle_pools(b))
+
+
+def outbid_value(rival_score: Fraction, gas_used: int, wins_ties: bool) -> int:
+    """Smallest integer bundle value (wei) whose score beats ``rival_score`` at ``gas_used`` gas.
+
+    A builder sorts by ``(-score, bundle_id)``, so at equal score the bundle
+    with the smaller id goes first; ``wins_ties`` says whether that is us.
+    """
+    if gas_used <= 0:
+        raise ConfigError("gas_used must be positive")
+    x = Fraction(rival_score) * gas_used
+    floor = x.numerator // x.denominator
+    if x.denominator == 1:
+        return floor if wins_ties else floor + 1
+    return floor + 1
+
+
+class FeeStructure(str, Enum):
+    NONE = "none"  # already outranks every rival
+    PRIORITY_TIP = "priority_tip"  # raise maxPriorityFeePerGas on the searcher's own legs
+    COINBASE = "coinbase"  # raise the coinbase transfer
+
+
+@dataclass(frozen=True)
+class EvictionQuote:
+    """Exact cost of displacing every conflicting rival bundle from the block."""
+
+    bundle_id: str
+    base_fee: int
+    own_included: bool
+    rivals: Tuple[str, ...]
+    live_rivals: Tuple[str, ...]
+    top_rival: str
+    top_rival_score: Fraction
+    gas_used: int
+    searcher_gas_used: int
+    current_value_wei: int
+    required_value_wei: int
+    tip_delta_per_gas: int
+    tip_cost_wei: int
+    coinbase_cost_wei: int
+    structure: FeeStructure
+    extra_cost_wei: int
+    gas_burn_wei: int
+    new_priority_fee_per_gas: int
+    feasible: bool
+    reason: str = ""
+
+    @property
+    def extra_value_wei(self) -> int:
+        return max(0, self.required_value_wei - self.current_value_wei)
+
+    @property
+    def rounding_overhead_wei(self) -> int:
+        """Wei the priority-tip structure overpays because tips are per gas."""
+        return self.tip_cost_wei - self.extra_value_wei if self.searcher_gas_used else 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "bundle_id": self.bundle_id,
+            "own_included": self.own_included,
+            "rivals": list(self.rivals),
+            "live_rivals": list(self.live_rivals),
+            "top_rival": self.top_rival,
+            "top_rival_score_wei_per_gas": float(self.top_rival_score),
+            "gas_used": self.gas_used,
+            "searcher_gas_used": self.searcher_gas_used,
+            "current_value_wei": self.current_value_wei,
+            "required_value_wei": self.required_value_wei,
+            "extra_value_wei": self.extra_value_wei,
+            "tip_delta_per_gas": self.tip_delta_per_gas,
+            "tip_cost_wei": self.tip_cost_wei,
+            "coinbase_cost_wei": self.coinbase_cost_wei,
+            "structure": self.structure.value,
+            "extra_cost_wei": self.extra_cost_wei,
+            "gas_burn_wei": self.gas_burn_wei,
+            "new_priority_fee_per_gas": self.new_priority_fee_per_gas,
+            "feasible": self.feasible,
+            "reason": self.reason,
+        }
+
+
+def _own_effective_tip(bundle: Bundle, base_fee: int) -> int:
+    payer = bundle_payer(bundle)
+    tips = [t.effective_tip(base_fee) for t in bundle.txs if t.sender == payer]
+    tips = [x for x in tips if x is not None]
+    return min(tips) if tips else 0
+
+
+def quote_eviction(parent: BuilderState, bundle: Bundle, rivals: Sequence[Bundle], base_fee: int,
+                   gas_limit: int = BLOCK_GAS_LIMIT, policy: Optional[GuardPolicy] = None,
+                   budget_wei: Optional[int] = None, max_fee_per_gas: Optional[int] = None,
+                   prefer: Optional[FeeStructure] = None) -> EvictionQuote:
+    """Minimum extra payment (and how to pay it) for ``bundle`` to outrank every conflicting rival.
+
+    * ``budget_wei`` caps the extra spend the searcher accepts (``None``: unlimited).
+    * ``max_fee_per_gas`` caps the fee the priority-tip structure may set.
+    * ``prefer`` forces a structure when it is feasible.
+    """
+    ours = score_bundle(parent, bundle, base_fee, gas_limit, policy)
+    conflicting = [r for r in rivals if r.bundle_id != bundle.bundle_id and bundles_conflict(bundle, r)]
+    names = tuple(r.bundle_id for r in conflicting)
+    if not ours.included:
+        return EvictionQuote(bundle.bundle_id, base_fee, False, names, (), "", Fraction(0), 0, 0, 0, 0, 0, 0, 0,
+                             FeeStructure.NONE, 0, 0, _own_effective_tip(bundle, base_fee), False,
+                             f"own_bundle_fails:{ours.reason}")
+    live: List[Tuple[BundleScore, Bundle]] = []
+    for r in conflicting:
+        s = score_bundle(parent, r, base_fee, gas_limit, policy)
+        if s.included:
+            live.append((s, r))
+    G, g_s, V = ours.gas_used, ours.searcher_gas_used, ours.value_wei
+    required = V
+    top, top_score = "", Fraction(0)
+    for s, r in live:
+        need = outbid_value(s.score, G, bundle.bundle_id < r.bundle_id)
+        required = max(required, need)
+        if s.score > top_score or (s.score == top_score and (not top or r.bundle_id < top)):
+            top, top_score = r.bundle_id, s.score
+    extra = max(0, required - V)
+    old_tip = _own_effective_tip(bundle, base_fee)
+    tip_delta = -(-extra // g_s) if g_s else 0
+    tip_cost = tip_delta * g_s
+    tip_ok = g_s > 0 and (max_fee_per_gas is None or base_fee + old_tip + tip_delta <= max_fee_per_gas)
+    burn = base_fee * G
+    if extra == 0:
+        structure, cost = FeeStructure.NONE, 0
+    else:
+        options: List[Tuple[int, int, FeeStructure]] = [(extra, 1, FeeStructure.COINBASE)]
+        if tip_ok:
+            options.append((tip_cost, 0, FeeStructure.PRIORITY_TIP))
+        if prefer is not None and any(o[2] is prefer for o in options):
+            options = [o for o in options if o[2] is prefer]
+        cost, _, structure = min(options)
+    new_tip = old_tip + (tip_delta if structure is FeeStructure.PRIORITY_TIP else 0)
+    feasible = budget_wei is None or cost <= budget_wei
+    reason = "" if feasible else f"over_budget:{cost}>{budget_wei}"
+    return EvictionQuote(bundle.bundle_id, base_fee, True, names, tuple(r.bundle_id for _, r in live), top,
+                         top_score, G, g_s, V, required, tip_delta, tip_cost, extra, structure, cost, burn,
+                         new_tip, feasible, reason)
+
+
+def apply_eviction(bundle: Bundle, quote: EvictionQuote) -> Bundle:
+    """Return ``bundle`` re-priced as ``quote`` says (gas footprint unchanged)."""
+    if quote.structure is FeeStructure.NONE or not quote.own_included:
+        return bundle
+    if quote.structure is FeeStructure.COINBASE:
+        return replace(bundle, coinbase_transfer_wei=bundle.coinbase_transfer_wei + quote.extra_value_wei)
+    payer = bundle_payer(bundle)
+    tip = quote.new_priority_fee_per_gas
+    txs = tuple(
+        replace(t, max_priority_fee_per_gas=tip, max_fee_per_gas=max(t.max_fee_per_gas, quote.base_fee + tip))
+        if t.sender == payer else t
+        for t in bundle.txs
+    )
+    return replace(bundle, txs=txs)
+
+
+# Searcher-side sandwich construction shared by competitor bots and the RL agent.
+
+
+@dataclass(frozen=True)
+class SandwichQuote:
+    victim: str
+    hop: int
+    pool_id: str
+    token_in: str
+    token_out: str
+    frontrun_in: int
+    frontrun_out: int
+    backrun_out: int
+    profit: int  # in token_in units
+    profit_native_wei: int
+    leg_gas: int
+    gas_cost_wei: int  # both legs at (base_fee + tip)
+
+    @property
+    def net_wei(self) -> int:
+        """Native profit after gas, before any builder payment."""
+        return self.profit_native_wei - self.gas_cost_wei
+
+
+def sandwich_economics(state: BuilderState, victim: BuilderTx, hop: int, frontrun_in: int, base_fee: int,
+                       tip_wei: int = GWEI, native: str = "WETH") -> Optional[SandwichQuote]:
+    """Exact sandwich outcome for one front-run size on one hop, or None if any leg fails."""
+    hops = _route_hops(state.pools, victim)
+    if hops is None or not 0 <= hop < len(hops) or frontrun_in <= 0:
+        return None
+    r = simulate_route_sandwich(state.pools, victim, hop, frontrun_in)
+    if r is None:
+        return None
+    fo, _, bo = r
+    pid, tin, tout = hops[hop]
+    profit = bo - frontrun_in
+    profit_native = native_value(state.pools, tin, profit, native) if profit > 0 else \
+        -native_value(state.pools, tin, -profit, native)
+    leg_gas = estimate_swap_gas([state.pools[pid]], 0)
+    return SandwichQuote(victim.tx_hash, hop, pid, tin, tout, frontrun_in, fo, bo, profit, profit_native,
+                         leg_gas, 2 * leg_gas * (base_fee + tip_wei))
+
+
+def make_sandwich_bundle(state: BuilderState, victim: BuilderTx, quote: SandwichQuote, base_fee: int,
+                         searcher: str, bribe_wei: int = 0, tip_wei: int = GWEI, tag: str = "sw",
+                         min_out_slack_bps: int = 0) -> Bundle:
+    """Front / victim / back bundle for ``quote``.
+
+    The front leg's ``amount_out_min`` is exact unless ``min_out_slack_bps``
+    loosens it; the back leg always requires ``frontrun_in + 1`` back.
+    """
+    gas_limit = quote.leg_gas * 3 // 2 + 40_000
+    fee_cap = base_fee * 2 + tip_wei
+    nonce = state.nonce(searcher)
+    front_min = quote.frontrun_out * (10_000 - min_out_slack_bps) // 10_000
+    front = BuilderTx(f"{victim.tx_hash}:{tag}:front", searcher, nonce, gas_limit, fee_cap, tip_wei, TxKind.SWAP,
+                      {"route": [quote.pool_id], "token_in": quote.token_in, "amount_in": quote.frontrun_in,
+                       "amount_out_min": front_min})
+    back = BuilderTx(f"{victim.tx_hash}:{tag}:back", searcher, nonce + 1, gas_limit, fee_cap, tip_wei, TxKind.SWAP,
+                     {"route": [quote.pool_id], "token_in": quote.token_out, "amount_in": quote.frontrun_out,
+                      "amount_out_min": quote.frontrun_in + 1})
+    return Bundle(
+        bundle_id=f"{tag}:{victim.tx_hash}",
+        txs=(front, victim, back),
+        coinbase_transfer_wei=max(0, int(bribe_wei)),
+        searcher=searcher,
+        target_tx=victim.tx_hash,
+        meta={"hop": quote.hop, "pool_id": quote.pool_id, "profit": quote.profit,
+              "profit_native": quote.profit_native_wei, "net_wei": quote.net_wei, "tag": tag},
+    )
+
+
+class CompetitorStrategy(str, Enum):
+    STATIC_TIP = "static_tip"  # optimal size, fixed priority tip, no coinbase transfer
+    FIXED_SHARE = "fixed_share"  # optimal size, fixed share of net profit as coinbase transfer
+    STATIC_ROUTER = "static_router"  # front-run = fixed ratio of the victim's amount, fixed tip
+    ADAPTIVE = "adaptive"  # optimal size, share moves up after losses and down after wins
+
+
+@dataclass
+class CompetitorBot:
+    """A rival searcher with a fixed (or simple adaptive) bidding rule and a relay latency."""
+
+    name: str
+    strategy: CompetitorStrategy = CompetitorStrategy.FIXED_SHARE
+    share_bps: int = 5_000
+    tip_wei: int = 2 * GWEI
+    size_bps: int = 10_000
+    latency_ms: int = 250
+    jitter_ms: int = 120
+    step_bps: int = 400
+    min_share_bps: int = 500
+    max_share_bps: int = 9_500
+    wins: int = 0
+    losses: int = 0
+
+    def __post_init__(self) -> None:
+        self.strategy = CompetitorStrategy(self.strategy)
+        if not 0 <= self.share_bps <= 10_000 or not 0 < self.size_bps <= 20_000:
+            raise ConfigError("share_bps must be within [0, 10000] and size_bps within (0, 20000]")
+        if not 0 <= self.min_share_bps <= self.max_share_bps <= 10_000:
+            raise ConfigError("min_share_bps <= max_share_bps must hold within [0, 10000]")
+
+    @property
+    def searcher(self) -> str:
+        return f"bot:{self.name}"
+
+    def sample_delay(self, rng: random.Random) -> int:
+        return max(0, int(rng.gauss(self.latency_ms, self.jitter_ms)))
+
+    def build(self, state: BuilderState, victim: BuilderTx, oracle: Optional[SandwichCandidate], base_fee: int,
+              native: str = "WETH") -> Optional[Bundle]:
+        """The bot's bundle for ``victim`` (``oracle``: best sandwich on the current state), or None."""
+        if victim.kind is not TxKind.SWAP or victim.effective_tip(base_fee) is None:
+            return None
+        if self.strategy is CompetitorStrategy.STATIC_ROUTER:
+            hop = 0
+            size = victim.amount_in * self.size_bps // 10_000
+        else:
+            if oracle is None:
+                return None
+            hop = oracle.hop
+            size = oracle.frontrun_in * self.size_bps // 10_000
+        if size <= 0:
+            return None
+        tip = self.tip_wei
+        q = sandwich_economics(state, victim, hop, size, base_fee, tip, native)
+        if q is None or q.net_wei <= 0:
+            return None
+        if self.strategy in (CompetitorStrategy.STATIC_TIP, CompetitorStrategy.STATIC_ROUTER):
+            bribe = 0
+        else:
+            bribe = q.net_wei * self.share_bps // 10_000
+        return make_sandwich_bundle(state, victim, q, base_fee, self.searcher, bribe, tip, tag=self.name)
+
+    def observe(self, won: bool) -> None:
+        if won:
+            self.wins += 1
+            if self.strategy is CompetitorStrategy.ADAPTIVE:
+                self.share_bps = max(self.min_share_bps, self.share_bps - self.step_bps // 2)
+        else:
+            self.losses += 1
+            if self.strategy is CompetitorStrategy.ADAPTIVE:
+                self.share_bps = min(self.max_share_bps, self.share_bps + self.step_bps)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"name": self.name, "strategy": self.strategy.value, "share_bps": self.share_bps,
+                "tip_wei": self.tip_wei, "size_bps": self.size_bps, "latency_ms": self.latency_ms,
+                "wins": self.wins, "losses": self.losses}
+
+
+def default_competitors() -> List[CompetitorBot]:
+    """One bot per strategy, with distinct latencies."""
+    return [
+        CompetitorBot("static-tip", CompetitorStrategy.STATIC_TIP, tip_wei=3 * GWEI, latency_ms=180),
+        CompetitorBot("fixed-share", CompetitorStrategy.FIXED_SHARE, share_bps=5_000, latency_ms=260),
+        CompetitorBot("router", CompetitorStrategy.STATIC_ROUTER, size_bps=5_000, tip_wei=2 * GWEI,
+                      latency_ms=420, jitter_ms=200),
+        CompetitorBot("adaptive", CompetitorStrategy.ADAPTIVE, share_bps=6_000, latency_ms=220),
+    ]
+
+
+@dataclass
+class CompetitionOutcome:
+    block: SealedBlock
+    post_state: BuilderState
+    winners: Dict[str, str]  # target tx -> winning bundle_id
+    evicted: Dict[str, str]  # bundle_id -> reason it did not land
+    ranking: List[Tuple[str, Fraction]]
+
+    def won(self, bundle_id: str) -> bool:
+        return f"bundle:{bundle_id}" in self.block.included
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "winners": dict(self.winners),
+            "evicted": dict(self.evicted),
+            "ranking": [(b, float(s)) for b, s in self.ranking],
+            "gas_used": self.block.gas_used,
+            "value_wei": self.block.value_wei,
+        }
+
+
+def run_competition(parent: BuilderState, bundles: Sequence[Bundle], base_fee: int,
+                    txs: Sequence[BuilderTx] = (), gas_limit: int = BLOCK_GAS_LIMIT,
+                    builder: Optional[BlockBuilder] = None, trace: bool = False,
+                    rank: bool = False) -> CompetitionOutcome:
+    """Let a (greedy by default) builder pick among competing bundles; report who landed and who was evicted.
+
+    ``rank=True`` also fills ``ranking`` with each admitted bundle's score, in
+    builder order (costs one extra top-of-block simulation per bundle).
+    """
+    builder = builder or BlockBuilder("arena", Strategy.GREEDY, margin_bps=0)
+    gas_limit = clamp_gas_limit(gas_limit)
+    layout, notes = builder.order(parent, bundles, txs, base_fee, gas_limit)
+    block, post = seal_block(parent, layout, base_fee, gas_limit, builder.name, builder.coinbase, trace=trace,
+                             policy=builder.policy, compute_root=trace)
+    by_id = {b.bundle_id: b for b in bundles}
+    winners: Dict[str, str] = {}
+    evicted: Dict[str, str] = {}
+    for b in bundles:
+        iid = item_id(b)
+        if iid in block.included:
+            winners[b.target_tx or b.bundle_id] = b.bundle_id
+        else:
+            evicted[b.bundle_id] = notes.get(iid) or block.skipped.get(iid, "not_included")
+    ranking: List[Tuple[str, Fraction]] = []
+    if rank:
+        for x in layout:
+            if isinstance(x, Bundle) and x.bundle_id in by_id:
+                ranking.append((x.bundle_id, score_bundle(parent, x, base_fee, gas_limit, builder.policy).score))
+    return CompetitionOutcome(block, post, winners, evicted, ranking)
+
+
 __all__ = [
     "BLOCK_GAS_LIMIT",
     "ETH",
@@ -1898,4 +2363,23 @@ __all__ = [
     "repair_nonce_order",
     "seal_block",
     "simulate_route_sandwich",
+    "BundleScore",
+    "CompetitionOutcome",
+    "CompetitorBot",
+    "CompetitorStrategy",
+    "EvictionQuote",
+    "FeeStructure",
+    "SandwichQuote",
+    "apply_eviction",
+    "bundle_payer",
+    "bundle_pools",
+    "bundles_conflict",
+    "default_competitors",
+    "make_sandwich_bundle",
+    "outbid_value",
+    "quote_eviction",
+    "run_competition",
+    "sandwich_economics",
+    "score_bundle",
+    "GWEI",
 ]
