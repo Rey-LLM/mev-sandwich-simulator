@@ -18,6 +18,12 @@ slot, competing builders (vanilla, greedy, and a layout fuzzer on the worker
 pool) build blocks from the same transactions and sandwich bundles, relays
 re-execute the bids and the proposer takes the best one.
 
+Layer 05 adds the private relay (``private_relay``): in brutal mode
+``private_flow_bps`` of user swaps bypass the public pool and go to a
+Flashbots Protect / MEV-Share style relay, whose backrun auction and hint
+exposure matrix run on the same worker pool. Layer 06 (``multi_hop_router``)
+scans every arbitrage cycle up to ``router_max_hops`` hops in both modes.
+
 Everything runs offline on the simulator's own pool objects; no RPC or chain
 access is involved.
 
@@ -194,6 +200,11 @@ class SimulationConfig:
     layout_fuzz_iterations: int = 0  # block layouts the fuzzer builder evaluates per slot
     builder_margin_bps: int = 500  # share of block value a builder keeps (rest is bid to the proposer)
     bribe_bps: int = 8_000  # share of a sandwich's net profit paid to the builder as coinbase transfer
+    # Layer 05: private order flow (Flashbots Protect / MEV-Share relay).
+    private_flow_bps: int = 0  # share of user swaps sent to the private relay instead of the public pool
+    mev_share_refund_bps: int = 9_000  # share of a winning backrun payment refunded to the user
+    # Layer 06: multi-hop router.
+    router_max_hops: int = 3  # longest route / cycle the router enumerates
     # Multiprocessing.
     start_method: str = "spawn"
     parallel_threshold: int = 4  # fewer tasks than this run inline
@@ -214,6 +225,10 @@ class SimulationConfig:
             raise ConfigError("layout_fuzz_iterations must be non-negative")
         if not 0 <= self.builder_margin_bps <= 10_000 or not 0 <= self.bribe_bps <= 10_000:
             raise ConfigError("builder_margin_bps and bribe_bps must be within [0, 10000]")
+        if not 0 <= self.private_flow_bps <= 10_000 or not 0 <= self.mev_share_refund_bps <= 10_000:
+            raise ConfigError("private_flow_bps and mev_share_refund_bps must be within [0, 10000]")
+        if not 1 <= self.router_max_hops <= 6:
+            raise ConfigError("router_max_hops must be within [1, 6]")
 
     @property
     def gas_price_wei(self) -> int:
@@ -244,6 +259,9 @@ class SimulationConfig:
             "layout_fuzz_iterations": self.layout_fuzz_iterations,
             "builder_margin_bps": self.builder_margin_bps,
             "bribe_bps": self.bribe_bps,
+            "private_flow_bps": self.private_flow_bps,
+            "mev_share_refund_bps": self.mev_share_refund_bps,
+            "router_max_hops": self.router_max_hops,
         }
 
 
@@ -255,6 +273,8 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         refine_iterations=0,
         fuzz_iterations=128,
         layout_fuzz_iterations=0,
+        private_flow_bps=0,
+        router_max_hops=3,
     ),
     RunMode.BRUTAL_AGGRESSIVE: dict(
         blocks=6,
@@ -263,6 +283,8 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         refine_iterations=24,
         fuzz_iterations=2_000,
         layout_fuzz_iterations=2_048,
+        private_flow_bps=3_000,
+        router_max_hops=4,
     ),
 }
 

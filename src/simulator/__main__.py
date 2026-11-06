@@ -23,11 +23,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--fuzz", type=int, default=None, help="invariant fuzz iterations")
     parser.add_argument("--layouts", type=int, default=None, help="block layouts fuzzed per slot (brutal)")
     parser.add_argument("--gas-limit", type=int, default=None, help="block gas limit, at most 30000000")
+    parser.add_argument("--private-share", type=int, default=None,
+                        help="bps of user swaps routed to the private relay (brutal mode)")
+    parser.add_argument("--refund", type=int, default=None, help="MEV-Share refund to users, in bps")
+    parser.add_argument("--max-hops", type=int, default=None, help="router route / cycle length, 1-6")
     parser.add_argument("--trace", action="store_true", help="log every sealed block's tx trace to stderr")
     args = parser.parse_args(argv)
     overrides = {k: v for k, v in {
         "seed": args.seed, "blocks": args.blocks, "txs_per_block": args.txs, "fuzz_iterations": args.fuzz,
-        "layout_fuzz_iterations": args.layouts,
+        "layout_fuzz_iterations": args.layouts, "private_flow_bps": args.private_share,
+        "mev_share_refund_bps": args.refund, "router_max_hops": args.max_hops,
         "block_gas_limit": None if args.gas_limit is None else clamp_gas_limit(args.gas_limit),
     }.items() if v is not None}
     if args.trace:
@@ -38,7 +43,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     json.dump(report, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
     result = report["result"]
-    ok = result["invariants"]["ok"] and result.get("pbs", {}).get("invariants_ok", True)
+    ok = (result["invariants"]["ok"] and result.get("pbs", {}).get("invariants_ok", True)
+          and result.get("private_relay", {}).get("invariants_ok", True))
     return 0 if ok else 1
 
 

@@ -1668,15 +1668,20 @@ class MevBoostAuction:
     def run_slot(self, parent: BuilderState, bundles: Sequence[Bundle], txs: Sequence[BuilderTx],
                  base_fee: int, slot: int, gas_limit: int = BLOCK_GAS_LIMIT,
                  executor: Optional[WorkerPool] = None, seed: int = 0, measure_unrealized: bool = False,
-                 native: str = "WETH") -> AuctionResult:
+                 native: str = "WETH", extra_bundles: Optional[Mapping[str, Sequence[Bundle]]] = None
+                 ) -> AuctionResult:
+        """Run one slot. ``extra_bundles`` maps builder name -> bundles only that builder received
+        (Layer 05: private order flow decrypted from relay envelopes)."""
         gas_limit = clamp_gas_limit(gas_limit)
+        extra_bundles = extra_bundles or {}
         for r in self.relays:
             r.reset()
         bids: List[BuilderBid] = []
         built: Dict[str, Tuple[SealedBlock, BuilderState]] = {}
         info: Dict[str, Dict[str, Any]] = {}
         for builder in self.builders:
-            block, post, binfo = builder.build(parent, bundles, txs, base_fee, gas_limit, executor,
+            own_bundles = list(bundles) + list(extra_bundles.get(builder.name, ()))
+            block, post, binfo = builder.build(parent, own_bundles, txs, base_fee, gas_limit, executor,
                                                seed=seed * 7919 + slot, measure_unrealized=measure_unrealized,
                                                native=native)
             built[builder.name] = (block, post)
