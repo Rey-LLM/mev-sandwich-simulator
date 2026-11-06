@@ -709,6 +709,7 @@ class SandwichEnvironment:
         p_zfo = 0.5 + 0.45 * math.tanh(20 * dev)
         zfo = self.rng.random() < p_zfo
         reserve_in = pool.reserve0 if zfo else pool.reserve1
+        # audit: allow code.float_truncation (a random size draw, not exact wei math)
         amount = int(reserve_in * abs(self.rng.gauss(0, sigma)) / 10_000)
         if amount > 0:
             pool.apply_swap(pool.quote_exact_in(amount, zfo), zfo)
@@ -726,6 +727,7 @@ class SandwichEnvironment:
         reserve_in = pool.reserve0 if zfo else pool.reserve1
         lo, hi = math.log(self.regime.victim_min_bps), math.log(self.regime.victim_max_bps)
         size_bps = math.exp(self.rng.uniform(lo, hi))
+        # audit: allow code.float_truncation (a random size draw, not exact wei math)
         amount = max(1, int(reserve_in * size_bps / 10_000))
         tolerance = self.rng.choice((30, 50, 100, 200, 300, 500, 1_000))
         sender = f"user{self.rng.randrange(10_000):04d}"
@@ -1119,17 +1121,20 @@ class ReinforcementSimulation:
     """Controller entry: parallel policy iteration, then a greedy evaluation and a static-bot breakdown."""
 
     def __init__(self, seed: int = 0, rounds: int = 2, steps_per_shard: int = 48, eval_steps: int = 96,
-                 regime: str = "volatile", kind: str = "q_learning") -> None:
+                 regime: str = "volatile", kind: str = "q_learning", shards: int = RL_SHARDS) -> None:
+        if shards < 1:
+            raise ConfigError("shards must be >= 1")
         self.env_config = EnvConfig(seed=seed, regime=regime)
         self.seed = seed
         self.rounds = rounds
         self.steps_per_shard = steps_per_shard
         self.eval_steps = eval_steps
         self.kind = kind
+        self.shards = shards
 
     def run(self, executor: Optional[WorkerPool] = None) -> Dict[str, Any]:
-        train = parallel_policy_iteration(self.env_config, self.rounds, self.steps_per_shard, kind=self.kind,
-                                          seed=self.seed, executor=executor)
+        train = parallel_policy_iteration(self.env_config, self.rounds, self.steps_per_shard, shards=self.shards,
+                                          kind=self.kind, seed=self.seed, executor=executor)
         agent = train.agent(self.seed)
         ev = run_agent(agent, SandwichEnvironment(_with_seed(self.env_config, _seed_int(self.seed, "eval"))),
                        self.eval_steps, learn=False)

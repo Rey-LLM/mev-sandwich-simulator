@@ -907,22 +907,22 @@ class ExposureMatrix:
 def hint_exposure_matrix(state: BuilderState, txs: Sequence[BuilderTx],
                          profiles: Optional[Mapping[str, PrivacyPreferences]] = None,
                          executor: Optional[WorkerPool] = None, native: str = "WETH", grid: int = 12,
-                         refine: int = 6, max_hypotheses: int = 4) -> ExposureMatrix:
+                         refine: int = 6, max_hypotheses: int = 4, chunks: int = RELAY_CHUNKS) -> ExposureMatrix:
     """Exposure of every swap in ``txs`` under every hint profile, in fixed parallel chunks."""
     profiles = HINT_PROFILES if profiles is None else profiles
     items = [(tx, prefs, name) for tx in txs if tx.kind is TxKind.SWAP for name, prefs in profiles.items()]
-    return exposure_for_items(state, items, executor, native, grid, refine, max_hypotheses)
+    return exposure_for_items(state, items, executor, native, grid, refine, max_hypotheses, chunks)
 
 
 def exposure_for_items(state: BuilderState, items: Sequence[Tuple[BuilderTx, PrivacyPreferences, str]],
                        executor: Optional[WorkerPool] = None, native: str = "WETH", grid: int = 12,
-                       refine: int = 6, max_hypotheses: int = 4) -> ExposureMatrix:
+                       refine: int = 6, max_hypotheses: int = 4, chunks: int = RELAY_CHUNKS) -> ExposureMatrix:
     """Exposure of explicit ``(tx, prefs, profile_name)`` items (swaps only), in fixed parallel chunks."""
     started = time.perf_counter()
     items = [it for it in items if it[0].kind is TxKind.SWAP]
     payload = state.to_payload()
     tasks = [(payload, chunk, native, grid, refine, max_hypotheses, state.block_number)
-             for chunk in chunked(items, RELAY_CHUNKS)]
+             for chunk in chunked(items, max(1, chunks))]
     if executor is None:
         parts = [_exposure_chunk(t) for t in tasks]
     else:
@@ -1663,7 +1663,7 @@ class PrivateOrderflowSimulation:
         grid = cfg.frontrun_grid or 12
         refine = cfg.refine_iterations or 6
         own = executor is None
-        wp = WorkerPool(cfg.workers, cfg.start_method, cfg.parallel_threshold) if own else executor
+        wp = WorkerPool.for_config(cfg) if own else executor
         try:
             for slot in range(slots):
                 block = state.block_number
@@ -1706,7 +1706,7 @@ class PrivateOrderflowSimulation:
                     failures.append(f"slot {slot}: {private_sandwiched} private tx(s) sandwiched")
                 if exposure and private_now:
                     exposures.extend(exposure_for_items(state, private_now, wp, cfg.native_token, grid,
-                                                        refine).results)
+                                                        refine, chunks=cfg.shards(RELAY_CHUNKS)).results)
                 rows.append({
                     "slot": slot,
                     "block": block,

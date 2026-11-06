@@ -1,6 +1,6 @@
 [project]
 name = "mev-sandwich-simulator"
-version = "0.8.0"
+version = "0.10.0"
 description = "Offline MEV sandwich simulator"
 requires-python = ">=3.10"
 

@@ -1,0 +1,110 @@
+# sandwich.toml: central settings for the MEV sandwich simulator.
+#
+# Precedence, lowest first: the built-in preset of the mode < this file
+# < $MEV_SIM_WORKERS (worker count only) < --set TABLE.KEY=VALUE < flags.
+#
+#   python -m simulator --show-config      print the effective settings
+#   python -m simulator --sync-config      add keys that newer versions introduce
+#   python -m simulator --save-config ...  write command-line values back here
+#   python -m simulator --gui              edit this file in the browser
+
+[meta]
+schema_version = 1                       # layout version (written by the simulator)
+
+[run]
+mode = "moderate"                        # run mode: moderate | brutal | max
+seed = 7                                 # seed for every deterministic stream
+native_token = "WETH"                    # token profits and gas are valued in
+default_tolerance_bps = 50               # slippage tolerance (bps) for payloads without one
+
+[parallel]
+start_method = "spawn"                   # multiprocessing start method
+parallel_threshold = 4                   # batches smaller than this run inline
+
+[gas]
+base_fee_wei = 20_000_000_000            # starting base fee (wei)
+priority_fee_wei = 2_000_000_000         # searcher priority fee (wei)
+block_gas_limit = 30_000_000             # block gas limit, clamped into [21000, 30000000]
+
+[search]
+max_frontrun_bps = 2000                  # largest front-run as bps of the input reserve
+
+[pbs]
+builder_margin_bps = 500                 # share of block value a builder keeps (bps)
+bribe_bps = 8000                         # share of sandwich profit paid to the builder (bps)
+
+[private_relay]
+mev_share_refund_bps = 9000              # MEV-Share refund to users (bps)
+
+[rl]
+regime = "volatile"                      # RL market regime: calm | volatile | extreme
+
+[trace]
+enabled = false                          # log every sealed block's transaction trace
+path = ""                                # trace destination file (empty = stderr)
+
+[audit]
+enabled = true                           # run the integrity validator before simulating
+fail_on = "error"                        # lowest finding severity that blocks a run: error | warning | info
+code_scan = true                         # include the source code scan
+tick_samples = 256                       # ticks sampled by the tick-arithmetic checks
+
+# Moderate Scan: read-only telemetry, gas-limit audit, passive dataflow (50-60% of CPUs).
+[modes.moderate]
+workers = 0                              # worker processes (0 = automatic for the CPU policy)
+cpu_policy = "capped"                    # capped = 50-60% of CPUs, full = 100% of logical CPUs
+blocks = 1                               # blocks (slots) to simulate
+txs_per_block = 32                       # pending transactions per block
+frontrun_grid = 0                        # front-run sizes brute-forced per victim
+refine_iterations = 0                    # ternary-search refinement steps
+fuzz_iterations = 128                    # invariant fuzz swaps
+layout_fuzz_iterations = 0               # block layouts fuzzed per slot
+private_flow_bps = 0                     # share of user swaps sent to the private relay (bps)
+router_max_hops = 3                      # longest route / cycle (1-6)
+rl_rounds = 0                            # parallel policy-iteration rounds
+rl_steps_per_shard = 48                  # RL steps per shard and round
+rl_eval_steps = 96                       # greedy RL evaluation steps
+shard_density = 1                        # multiplier on every fixed shard / chunk count
+pg_paths = 0                             # policy-gradient paths fuzzed concurrently
+pg_path_steps = 16                       # steps per policy-gradient path
+pg_batch = 32                            # paths per worker task
+
+# Brutal Aggressive Simulation: multi-block sandwich search on the capped pool (50-60% of CPUs).
+[modes.brutal]
+workers = 0                              # worker processes (0 = automatic for the CPU policy)
+cpu_policy = "capped"                    # capped = 50-60% of CPUs, full = 100% of logical CPUs
+blocks = 6                               # blocks (slots) to simulate
+txs_per_block = 48                       # pending transactions per block
+frontrun_grid = 48                       # front-run sizes brute-forced per victim
+refine_iterations = 24                   # ternary-search refinement steps
+fuzz_iterations = 2000                   # invariant fuzz swaps
+layout_fuzz_iterations = 2048            # block layouts fuzzed per slot
+private_flow_bps = 3000                  # share of user swaps sent to the private relay (bps)
+router_max_hops = 4                      # longest route / cycle (1-6)
+rl_rounds = 3                            # parallel policy-iteration rounds
+rl_steps_per_shard = 64                  # RL steps per shard and round
+rl_eval_steps = 128                      # greedy RL evaluation steps
+shard_density = 1                        # multiplier on every fixed shard / chunk count
+pg_paths = 0                             # policy-gradient paths fuzzed concurrently
+pg_path_steps = 16                       # steps per policy-gradient path
+pg_batch = 32                            # paths per worker task
+
+# MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz.
+[modes.max]
+workers = 0                              # worker processes (0 = automatic for the CPU policy)
+cpu_policy = "full"                      # capped = 50-60% of CPUs, full = 100% of logical CPUs
+blocks = 8                               # blocks (slots) to simulate
+txs_per_block = 64                       # pending transactions per block
+frontrun_grid = 64                       # front-run sizes brute-forced per victim
+refine_iterations = 32                   # ternary-search refinement steps
+fuzz_iterations = 8192                   # invariant fuzz swaps
+layout_fuzz_iterations = 4096            # block layouts fuzzed per slot
+private_flow_bps = 3000                  # share of user swaps sent to the private relay (bps)
+router_max_hops = 5                      # longest route / cycle (1-6)
+rl_rounds = 4                            # parallel policy-iteration rounds
+rl_steps_per_shard = 64                  # RL steps per shard and round
+rl_eval_steps = 256                      # greedy RL evaluation steps
+shard_density = 16                       # multiplier on every fixed shard / chunk count
+pg_paths = 4096                          # policy-gradient paths fuzzed concurrently
+pg_path_steps = 16                       # steps per policy-gradient path
+pg_batch = 32                            # paths per worker task

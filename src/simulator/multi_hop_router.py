@@ -1081,7 +1081,8 @@ class MultiHopRouter:
     def scan_cycles(self, max_hops: Optional[int] = None, executor: Optional[WorkerPool] = None,
                     gas_price_wei: int = 0, min_net_profit_native: int = 0,
                     start_tokens: Optional[Iterable[str]] = None, grid: int = 24, refine: int = 48,
-                    max_input_bps: int = 2_000, through_pools: Optional[Iterable[str]] = None) -> CycleScanReport:
+                    max_input_bps: int = 2_000, through_pools: Optional[Iterable[str]] = None,
+                    chunks: int = ROUTER_CHUNKS) -> CycleScanReport:
         """Evaluate every cycle (optionally only those through ``through_pools``) in parallel chunks."""
         hops = max_hops or self.max_hops
         started = time.perf_counter()
@@ -1091,7 +1092,7 @@ class MultiHopRouter:
             cycles = [c for c in cycles if wanted & set(c.pool_ids)]
         pool_list = list(self.pools.values())
         tasks = [(pool_list, chunk, self.native, gas_price_wei, grid, refine, max_input_bps)
-                 for chunk in chunked(cycles, ROUTER_CHUNKS)]
+                 for chunk in chunked(cycles, max(1, chunks))]
         opps = [o for part in _run(executor, _cycle_chunk, tasks) for o in part]
         opps = [o for o in opps if o.net_profit_native >= min_net_profit_native]
         opps.sort(key=lambda o: (-o.net_profit_native, -o.profit_native, o.path.key))

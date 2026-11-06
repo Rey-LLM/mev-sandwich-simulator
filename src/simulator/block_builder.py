@@ -1283,6 +1283,7 @@ def generate_builder_mempool(state: BuilderState, count: int, seed: int, base_fe
             route = _multi_hop_route(pools, pool, token_in, rng) if rng.random() < 0.3 else [pool.pool_id]
             zfo, _ = _direction(pool, token_in)
             size_bps = 10 ** rng.uniform(0, 2.2)
+            # audit: allow code.float_truncation (a random size draw, not exact wei math)
             amount = max(1, int(input_reserve_scale(pool, zfo) * size_bps / 10_000))
             tolerance = rng.choice((10, 30, 50, 100, 300, 500, 1000))
             probe = BuilderTx("probe", sender, nonce, BLOCK_GAS_LIMIT, fee_cap, tip, TxKind.SWAP,
@@ -1480,11 +1481,14 @@ class BlockBuilder:
     fuzz_iterations: int = 0
     policy: GuardPolicy = field(default_factory=GuardPolicy)
     min_bundle_value_wei: int = 1
+    fuzz_shards: int = FUZZ_SHARDS  # layout-fuzz shards per slot (config.shard_density scales it)
 
     def __post_init__(self) -> None:
         self.strategy = Strategy(self.strategy)
         if not 0 <= self.margin_bps <= 10_000:
             raise ConfigError("margin_bps must be within [0, 10000]")
+        if self.fuzz_shards < 1:
+            raise ConfigError("fuzz_shards must be >= 1")
 
     @property
     def coinbase(self) -> str:
@@ -1525,7 +1529,7 @@ class BlockBuilder:
                               and not notes.get(item_id(b), "").startswith("guard_rejected")]
             start = list(range(len(layout)))
             fz = fuzz_block_layout(parent, items, start, base_fee, gas_limit, self.fuzz_iterations, seed,
-                                   executor, policy=self.policy)
+                                   executor, shards=self.fuzz_shards, policy=self.policy)
             layout = [items[i] for i in fz.layout]
             info["fuzz"] = fz.to_dict()
         block, post = seal_block(parent, layout, base_fee, gas_limit, self.name, self.coinbase, trace=True,
@@ -1727,7 +1731,8 @@ def default_builders(config: SimulationConfig) -> List[BlockBuilder]:
     ]
     if config.layout_fuzz_iterations > 0:
         builders.append(BlockBuilder("fuzzer", Strategy.FUZZ, margin_bps=config.builder_margin_bps,
-                                     fuzz_iterations=config.layout_fuzz_iterations))
+                                     fuzz_iterations=config.layout_fuzz_iterations,
+                                     fuzz_shards=config.shards(FUZZ_SHARDS)))
     return builders
 
 
@@ -1787,7 +1792,7 @@ class PBSSimulation:
         grid = cfg.frontrun_grid or 12
         refine = cfg.refine_iterations or 6
         own = executor is None
-        wp = WorkerPool(cfg.workers, cfg.start_method, cfg.parallel_threshold) if own else executor
+        wp = WorkerPool.for_config(cfg) if own else executor
         try:
             for slot in range(slots):
                 base_fees.append(base_fee)

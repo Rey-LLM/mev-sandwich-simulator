@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .config import SimulationConfig
 from .dataflow import TokenFlowGraph
-from .invariants import InvariantReport, InvariantViolation, input_reserve_scale, parallel_fuzz
+from .invariants import FUZZ_SHARDS, InvariantReport, InvariantViolation, input_reserve_scale, parallel_fuzz
 from .parallel import WorkerPool, chunked
 from .slippage_engine import (
     ConcentratedPool,
@@ -48,7 +48,7 @@ GAS_TX_BASE = 21_000
 GAS_PER_HOP = {"v2": 60_000, "v3": 80_000, "v4": 70_000}
 GAS_PER_TICK_CROSS = 20_000
 SEARCHER = "searcher"
-TASK_CHUNKS = 16  # fixed so results never depend on worker count
+TASK_CHUNKS = 16  # fixed so results never depend on worker count (times config.shard_density)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +124,7 @@ def generate_mempool(pools: Iterable[Pool], count: int, seed: int, block: int = 
         token_in = pool.tokens()[rng.randrange(2)]
         zero_for_one, _ = _direction(pool, token_in)
         size_bps = 10 ** rng.uniform(0, math.log10(300))
+        # audit: allow code.float_truncation (a random size draw, not exact wei math)
         amount = max(1, int(input_reserve_scale(pool, zero_for_one) * size_bps / 10_000))
         tolerance = rng.choice((10, 30, 50, 100, 300, 500, 1000))
         try:
@@ -409,7 +410,7 @@ class MempoolEmulator:
 
     def _executor(self) -> WorkerPool:
         cfg = self.config
-        return WorkerPool(cfg.workers, cfg.start_method, cfg.parallel_threshold)
+        return WorkerPool.for_config(cfg)
 
     def generate(self, count: Optional[int] = None, block: int = 0,
                  pools: Optional[Iterable[Pool]] = None) -> List[PendingTx]:
@@ -425,9 +426,11 @@ class MempoolEmulator:
         own = executor is None
         wp = self._executor() if own else executor
         try:
-            tasks = [(self.pools, cfg.default_tolerance_bps, chunk) for chunk in chunked(txs, TASK_CHUNKS)]
+            tasks = [(self.pools, cfg.default_tolerance_bps, chunk)
+                     for chunk in chunked(txs, cfg.shards(TASK_CHUNKS))]
             rows = [row for part in wp.map(_scan_chunk, tasks) for row in part]
-            fuzz = parallel_fuzz(self.pools, cfg.fuzz_iterations, cfg.seed, executor=wp)
+            fuzz = parallel_fuzz(self.pools, cfg.fuzz_iterations, cfg.seed, executor=wp,
+                                 shards=cfg.shards(FUZZ_SHARDS))
         finally:
             if own:
                 wp.close()
@@ -446,7 +449,7 @@ class MempoolEmulator:
                executor: WorkerPool) -> Dict[str, SandwichPlan]:
         cfg = self.config
         tasks = [(pools, chunk, cfg.frontrun_grid, cfg.refine_iterations, cfg.max_frontrun_bps)
-                 for chunk in chunked(list(txs), TASK_CHUNKS)]
+                 for chunk in chunked(list(txs), cfg.shards(TASK_CHUNKS))]
         plans: Dict[str, SandwichPlan] = {}
         for part in executor.map(_search_chunk, tasks):
             for plan in part:
@@ -486,7 +489,8 @@ class MempoolEmulator:
                             "block.v2_k_non_decreasing", pid, f"k {k} -> {pool.k}", (state.block_number,)))
                 per_block = cfg.fuzz_iterations // cfg.blocks
                 invariants.merge(parallel_fuzz(state.pools.values(), per_block,
-                                               cfg.seed + state.block_number, executor=wp))
+                                               cfg.seed + state.block_number, executor=wp,
+                                               shards=cfg.shards(FUZZ_SHARDS)))
                 report.state_root = state.state_root()
                 blocks.append(report)
                 state.mine()

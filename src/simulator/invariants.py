@@ -44,6 +44,9 @@ from .slippage_engine import (
 )
 
 
+FUZZ_SHARDS = 8  # default shard count of parallel_fuzz (fixed, so results never depend on workers)
+
+
 @dataclass(frozen=True)
 class InvariantViolation:
     name: str
@@ -229,7 +232,7 @@ def fuzz_tasks(pools: Sequence[Pool], iterations: int, seed: int, shards: int) -
 
 
 def parallel_fuzz(pools: Iterable[Pool], iterations: int, seed: int = 0, workers: Optional[int] = None,
-                  shards: int = 8, start_method: str = "spawn", parallel_threshold: int = 4,
+                  shards: int = FUZZ_SHARDS, start_method: str = "spawn", parallel_threshold: int = 4,
                   executor: Optional[Any] = None) -> InvariantReport:
     """Fuzz every pool with ``iterations`` swaps, sharded across a capped worker pool.
 
@@ -279,6 +282,7 @@ def bounded_exhaustive_v2(max_reserve: int = 24, max_amount: int = 24,
 
 
 __all__ = [
+    "FUZZ_SHARDS",
     "InvariantViolation",
     "InvariantReport",
     "check_v2_swap",
