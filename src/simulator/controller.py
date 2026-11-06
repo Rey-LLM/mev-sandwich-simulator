@@ -1,8 +1,9 @@
-"""Layer 03: simulation controller.
+"""Layers 03-04: simulation controller.
 
 ``SimulationController`` is the single entry point that dispatches a run to
 the mode chosen in :class:`SimulationConfig`, owns the capped worker pool
-for the whole run, and returns a JSON-serialisable report.
+for the whole run, and returns a JSON-serialisable report. Brutal runs add a
+``pbs`` section from :class:`simulator.block_builder.PBSSimulation`.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import time
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from .block_builder import PBSSimulation
 from .config import RunMode, SimulationConfig, SystemSpec
 from .mempool_emulator import MempoolEmulator, PendingTx
 from .parallel import WorkerPool
@@ -55,6 +57,7 @@ class SimulationController:
                 body = emulator.scan(txs, executor=wp).summary()
             else:
                 body = emulator.run_blocks(executor=wp).summary()
+                body["pbs"] = PBSSimulation(pools, cfg).run(executor=wp).summary()
         return {
             "mode": cfg.mode.value,
             "mode_label": cfg.mode.label,

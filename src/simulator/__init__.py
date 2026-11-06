@@ -6,6 +6,9 @@ multiprocessing pool), ``state_fork`` (snapshot / revert / fork),
 ``dataflow`` (token flow graph), ``invariants`` (XY=K and CL property checks),
 ``mempool_emulator`` (scan and multi-block sandwich search) and
 ``controller`` (entry point; also ``python -m simulator``).
+Layer 04: ``block_builder`` (PBS / MEV-Boost auction, EIP-1559 + nonce
+ordering, bundle simulation, sandwich and JIT guards, gas-capped sealing with
+per-tx traces, parallel block layout fuzzer).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

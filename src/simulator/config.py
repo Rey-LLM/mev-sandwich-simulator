@@ -13,6 +13,11 @@ Two hardcoded execution modes drive the simulator:
   a forkable in-memory state across several blocks, and every block is
   followed by a long invariant fuzz.
 
+Brutal mode also runs the Layer 04 PBS simulation (``block_builder``): per
+slot, competing builders (vanilla, greedy, and a layout fuzzer on the worker
+pool) build blocks from the same transactions and sandwich bundles, relays
+re-execute the bids and the proposer takes the best one.
+
 Everything runs offline on the simulator's own pool objects; no RPC or chain
 access is involved.
 
@@ -184,6 +189,11 @@ class SimulationConfig:
     priority_fee_wei: int = 2 * 10**9
     native_token: str = "WETH"
     default_tolerance_bps: int = 50
+    # Layer 04: PBS block building.
+    block_gas_limit: int = 30_000_000  # hard cap; see block_builder.BLOCK_GAS_LIMIT
+    layout_fuzz_iterations: int = 0  # block layouts the fuzzer builder evaluates per slot
+    builder_margin_bps: int = 500  # share of block value a builder keeps (rest is bid to the proposer)
+    bribe_bps: int = 8_000  # share of a sandwich's net profit paid to the builder as coinbase transfer
     # Multiprocessing.
     start_method: str = "spawn"
     parallel_threshold: int = 4  # fewer tasks than this run inline
@@ -198,6 +208,12 @@ class SimulationConfig:
             raise ConfigError("max_frontrun_bps must be within (0, 10000]")
         if self.workers < 1:
             raise ConfigError("workers must be >= 1")
+        if not 21_000 <= self.block_gas_limit <= 30_000_000:
+            raise ConfigError("block_gas_limit must be within [21000, 30000000]")
+        if self.layout_fuzz_iterations < 0:
+            raise ConfigError("layout_fuzz_iterations must be non-negative")
+        if not 0 <= self.builder_margin_bps <= 10_000 or not 0 <= self.bribe_bps <= 10_000:
+            raise ConfigError("builder_margin_bps and bribe_bps must be within [0, 10000]")
 
     @property
     def gas_price_wei(self) -> int:
@@ -224,6 +240,10 @@ class SimulationConfig:
             "max_frontrun_bps": self.max_frontrun_bps,
             "fuzz_iterations": self.fuzz_iterations,
             "gas_price_wei": self.gas_price_wei,
+            "block_gas_limit": self.block_gas_limit,
+            "layout_fuzz_iterations": self.layout_fuzz_iterations,
+            "builder_margin_bps": self.builder_margin_bps,
+            "bribe_bps": self.bribe_bps,
         }
 
 
@@ -234,6 +254,7 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         frontrun_grid=0,
         refine_iterations=0,
         fuzz_iterations=128,
+        layout_fuzz_iterations=0,
     ),
     RunMode.BRUTAL_AGGRESSIVE: dict(
         blocks=6,
@@ -241,6 +262,7 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         frontrun_grid=48,
         refine_iterations=24,
         fuzz_iterations=2_000,
+        layout_fuzz_iterations=2_048,
     ),
 }
 

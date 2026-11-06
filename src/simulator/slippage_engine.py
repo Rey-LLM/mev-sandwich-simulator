@@ -30,6 +30,7 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------------
@@ -205,8 +206,9 @@ _TICK_MAGIC = (
 )
 
 
+@lru_cache(maxsize=1 << 18)
 def get_sqrt_ratio_at_tick(tick: int) -> int:
-    """TickMath.getSqrtRatioAtTick: sqrt(1.0001^tick) as a Q64.96."""
+    """TickMath.getSqrtRatioAtTick: sqrt(1.0001^tick) as a Q64.96 (pure, so memoized)."""
     abs_tick = -tick if tick < 0 else tick
     if abs_tick > MAX_TICK:
         raise MASEError("tick out of range")
