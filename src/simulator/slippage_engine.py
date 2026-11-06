@@ -11,6 +11,9 @@ Integer-exact AMM math for slippage analysis inside the offline simulator:
   tolerance, and the gap between quoted and minimum output).
 * ``MASEEngine.evaluate_payload``: entry point for execution payloads coming
   from the mempool layer.
+* Layer 03: ``MASEEngine.evaluate_batch(workers=...)`` and
+  ``sweep_trade_sizes`` spread batches and size sweeps over a capped
+  ``multiprocessing`` pool (see ``simulator.parallel``).
 
 All quoting functions are pure: pool objects are never mutated unless
 ``apply_swap`` is called explicitly.
@@ -951,8 +954,71 @@ class MASEEngine:
         )
         return out
 
-    def evaluate_batch(self, payloads: Iterable[Union[SwapPayload, Mapping[str, Any]]]) -> List[Dict[str, Any]]:
-        return [self.evaluate_payload(p) for p in payloads]
+    def evaluate_batch(self, payloads: Iterable[Union[SwapPayload, Mapping[str, Any]]],
+                       workers: Optional[int] = None, parallel_threshold: int = 4,
+                       start_method: str = "spawn") -> List[Dict[str, Any]]:
+        """Evaluate payloads against the current pool state, in input order.
+
+        With ``workers`` set, payload chunks are spread over a capped
+        ``multiprocessing`` pool (see :mod:`simulator.parallel`). Each worker
+        gets its own copy of the pools, so results match the serial path.
+        """
+        payloads = list(payloads)
+        if workers is None:
+            return [self.evaluate_payload(p) for p in payloads]
+        from .parallel import WorkerPool, chunked
+
+        with WorkerPool(workers, start_method, parallel_threshold) as wp:
+            if not wp.will_parallelize(len(payloads)):
+                return [self.evaluate_payload(p) for p in payloads]
+            pools = list(self.pools.values())
+            tasks = [(pools, self.default_tolerance_bps, chunk)
+                     for chunk in chunked(payloads, wp.workers * 4)]
+            return [row for part in wp.map(_evaluate_chunk, tasks) for row in part]
+
+
+def _evaluate_chunk(task: Tuple[List[Pool], int, List[Any]]) -> List[Dict[str, Any]]:
+    pools, tolerance, payloads = task
+    engine = MASEEngine(pools, tolerance)
+    return [engine.evaluate_payload(p) for p in payloads]
+
+
+# ---------------------------------------------------------------------------
+# Parallel trade-size sweeps
+# ---------------------------------------------------------------------------
+
+
+def _sweep_chunk(task: Tuple[Pool, str, List[int], int]) -> List[Dict[str, Any]]:
+    pool, token_in, amounts, tolerance = task
+    rows: List[Dict[str, Any]] = []
+    for amount in amounts:
+        try:
+            rows.append(evaluate_trade(pool, token_in, amount, tolerance).to_dict())
+        except MASEError as exc:
+            rows.append({"amount_in": amount, "error": str(exc)})
+    return rows
+
+
+def sweep_trade_sizes(pool: Pool, token_in: str, amounts: Sequence[int], tolerance_bps: int = 50,
+                      workers: Optional[int] = None, parallel_threshold: int = 4,
+                      start_method: str = "spawn") -> List[Dict[str, Any]]:
+    """Price-impact curve: quote every size in ``amounts`` against ``pool``.
+
+    One swap walks the tick array sequentially, so the parallelism is across
+    sizes: chunks of the size array go to separate worker processes. Rows come
+    back in input order; a size that cannot be quoted yields
+    ``{"amount_in": n, "error": ...}``.
+    """
+    amounts = [int(a) for a in amounts]
+    if workers is None:
+        return _sweep_chunk((pool, token_in, amounts, tolerance_bps))
+    from .parallel import WorkerPool, chunked
+
+    with WorkerPool(workers, start_method, parallel_threshold) as wp:
+        if not wp.will_parallelize(len(amounts)):
+            return _sweep_chunk((pool, token_in, amounts, tolerance_bps))
+        tasks = [(pool, token_in, chunk, tolerance_bps) for chunk in chunked(amounts, wp.workers * 4)]
+        return [row for part in wp.map(_sweep_chunk, tasks) for row in part]
 
 
 __all__ = [
@@ -986,4 +1052,5 @@ __all__ = [
     "evaluate_trade",
     "evaluate_route",
     "min_amount_out",
+    "sweep_trade_sizes",
 ]
