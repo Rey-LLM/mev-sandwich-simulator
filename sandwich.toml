@@ -1,143 +1,146 @@
-# sandwich.toml: central settings for the MEV sandwich simulator.
+# sandwich.toml: центральный файл настроек симулятора MEV-сэндвичей.
 #
-# Precedence, lowest first: the built-in preset of the mode < this file
-# < $MEV_SIM_WORKERS (worker count only) < --set TABLE.KEY=VALUE < flags.
+# Приоритет, от низшего к высшему: встроенный пресет режима < этот файл
+# < $MEV_SIM_WORKERS (только число процессов) < --set ТАБЛИЦА.КЛЮЧ=ЗНАЧЕНИЕ < флаги.
 #
-#   python -m simulator --show-config      print the effective settings
-#   python -m simulator --sync-config      add keys that newer versions introduce
-#   python -m simulator --save-config ...  write command-line values back here
-#   python -m simulator --gui              edit this file in the browser
+#   python -m simulator --show-config      показать действующие настройки
+#   python -m simulator --sync-config      добавить ключи, появившиеся в новых версиях
+#   python -m simulator --save-config ...  записать значения из командной строки в файл
+#   python -m simulator --gui              редактировать этот файл в браузере
 
 [meta]
-schema_version = 1                       # layout version (written by the simulator)
+schema_version = 1                       # версия разметки (записывается симулятором)
 
 [run]
-mode = "moderate"                        # run mode: moderate | brutal | max
-seed = 7                                 # seed for every deterministic stream
-native_token = "WETH"                    # token profits and gas are valued in
-default_tolerance_bps = 50               # slippage tolerance (bps) for payloads without one
+mode = "moderate"                        # режим запуска: moderate | brutal | max
+seed = 7                                 # зерно всех детерминированных потоков
+native_token = "WETH"                    # токен, в котором считаются прибыль и газ
+default_tolerance_bps = 50               # допуск проскальзывания (bps) для транзакций без своего допуска
 
 [parallel]
-start_method = "spawn"                   # multiprocessing start method
-parallel_threshold = 4                   # batches smaller than this run inline
+start_method = "spawn"                   # способ запуска процессов multiprocessing
+parallel_threshold = 4                   # пакеты меньше этого размера выполняются в текущем процессе
 
 [gas]
-base_fee_wei = 20_000_000_000            # starting base fee (wei)
-priority_fee_wei = 2_000_000_000         # searcher priority fee (wei)
-block_gas_limit = 30_000_000             # block gas limit, clamped into [21000, 30000000]
+base_fee_wei = 20_000_000_000            # начальная базовая комиссия (wei)
+priority_fee_wei = 2_000_000_000         # приоритетная комиссия сёрчера (wei)
+block_gas_limit = 30_000_000             # лимит газа блока, приводится к [21000, 30000000]
 
 [search]
-max_frontrun_bps = 2000                  # largest front-run as bps of the input reserve
+max_frontrun_bps = 2000                  # наибольший фронтран в bps от входного резерва
 
 [pbs]
-builder_margin_bps = 500                 # share of block value a builder keeps (bps)
-bribe_bps = 8000                         # share of sandwich profit paid to the builder (bps)
+builder_margin_bps = 500                 # доля стоимости блока, которую оставляет билдер (bps)
+bribe_bps = 8000                         # доля прибыли сэндвича, выплачиваемая билдеру (bps)
 
 [private_relay]
-mev_share_refund_bps = 9000              # MEV-Share refund to users (bps)
+mev_share_refund_bps = 9000              # возврат пользователям через MEV-Share (bps)
 
 [rl]
-regime = "volatile"                      # RL market regime: calm | volatile | extreme
+regime = "volatile"                      # рыночный режим RL: calm | volatile | extreme
 
 [trace]
-enabled = false                          # log every sealed block's transaction trace
-path = ""                                # trace destination file (empty = stderr)
+enabled = false                          # записывать трассу транзакций каждого запечатанного блока
+path = ""                                # файл трассировки (пусто = stderr)
 
 [audit]
-enabled = true                           # run the integrity validator before simulating
-fail_on = "error"                        # lowest finding severity that blocks a run: error | warning | info
-code_scan = true                         # include the source code scan
-tick_samples = 256                       # ticks sampled by the tick-arithmetic checks
+enabled = true                           # запускать проверку целостности перед симуляцией
+fail_on = "error"                        # минимальная серьёзность находки, блокирующая запуск: error | warning | info
+code_scan = true                         # включить сканирование исходного кода
+tick_samples = 256                       # число тиков в проверках арифметики тиков
 
 [patterns]
-store = ""                               # MEV pattern store directory (empty = synthetic reference patterns only)
-max_storage_gb = 500                     # storage cap of the pattern store in GiB (segments + index)
-segment_mb = 64                          # pattern segment file rotation size (MiB)
-cache_mb = 256                           # decoded pattern LRU cache budget (MiB)
+store = ""                               # каталог хранилища MEV-паттернов (пусто = только синтетические эталонные паттерны)
+max_storage_gb = 500                     # предел объёма хранилища паттернов в ГиБ (сегменты + индекс)
+segment_mb = 64                          # размер ротации файла-сегмента паттернов (МиБ)
+cache_mb = 256                           # бюджет LRU-кэша декодированных паттернов (МиБ)
 
-# Moderate Scan: read-only telemetry, gas-limit audit, passive dataflow (50-60% of CPUs).
+[ui]
+language = "ru"                          # язык интерфейса, журналов и HTML-графиков: ru | en
+
+# Умеренное сканирование: телеметрия только для чтения, аудит лимита газа, пассивный поток данных (50-60% ядер CPU).
 [modes.moderate]
-workers = 0                              # worker processes (0 = automatic for the CPU policy)
-cpu_policy = "capped"                    # capped = 50-60% of CPUs, full = 100% of logical CPUs
-blocks = 1                               # blocks (slots) to simulate
-txs_per_block = 32                       # pending transactions per block
-frontrun_grid = 0                        # front-run sizes brute-forced per victim
-refine_iterations = 0                    # ternary-search refinement steps
-fuzz_iterations = 128                    # invariant fuzz swaps
-layout_fuzz_iterations = 0               # block layouts fuzzed per slot
-private_flow_bps = 0                     # share of user swaps sent to the private relay (bps)
-router_max_hops = 3                      # longest route / cycle (1-6)
-rl_rounds = 0                            # parallel policy-iteration rounds
-rl_steps_per_shard = 48                  # RL steps per shard and round
-rl_eval_steps = 96                       # greedy RL evaluation steps
-shard_density = 1                        # multiplier on every fixed shard / chunk count
-pg_paths = 0                             # policy-gradient paths fuzzed concurrently
-pg_path_steps = 16                       # steps per policy-gradient path
-pg_batch = 32                            # paths per worker task
-agent_bots = 0                           # AI-generated competitor bots per generation (0 = off)
-agent_generations = 2                    # AI factory generations (synthesise, deploy, retrain)
-agent_heat_size = 8                      # AI bots per arena heat (one worker task)
-agent_heat_slots = 12                    # blocks each AI arena heat simulates
-pattern_seed_bps = 0                     # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
-pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
-pattern_synthetic = 0                    # generated reference patterns used when no pattern store is set
-custom_bots = 0                          # AI-designed custom bot blueprints per generation (0 = off)
-custom_generations = 2                   # custom builder generations (design, compile, score, retrain)
+workers = 0                              # рабочие процессы (0 = автоматически по политике CPU)
+cpu_policy = "capped"                    # capped = 50-60% ядер CPU, full = 100% логических ядер
+blocks = 1                               # число симулируемых блоков (слотов)
+txs_per_block = 32                       # ожидающих транзакций на блок
+frontrun_grid = 0                        # размеров фронтрана, перебираемых для каждой жертвы
+refine_iterations = 0                    # шагов уточнения тернарным поиском
+fuzz_iterations = 128                    # свопов фаззинга инвариантов
+layout_fuzz_iterations = 0               # раскладок блока, фаззимых на слот
+private_flow_bps = 0                     # доля пользовательских свопов, отправляемых в приватный релей (bps)
+router_max_hops = 3                      # самый длинный маршрут / цикл (1-6)
+rl_rounds = 0                            # раундов параллельной итерации политики
+rl_steps_per_shard = 48                  # шагов RL на шард и раунд
+rl_eval_steps = 96                       # шагов жадной оценки RL
+shard_density = 1                        # множитель всех фиксированных чисел шардов / чанков
+pg_paths = 0                             # путей градиента политики, фаззимых параллельно
+pg_path_steps = 16                       # шагов на путь градиента политики
+pg_batch = 32                            # путей на задачу рабочего процесса
+agent_bots = 0                           # ИИ-ботов-конкурентов в поколении (0 = выкл.)
+agent_generations = 2                    # поколений фабрики ИИ (синтез, развёртывание, дообучение)
+agent_heat_size = 8                      # ИИ-ботов в заезде арены (одна задача процесса)
+agent_heat_slots = 12                    # блоков, симулируемых в каждом заезде арены
+pattern_seed_bps = 0                     # доля ИИ-ботов поколения 0 из MEV-паттернов (bps, 0 = выкл.)
+pattern_limit = 4096                     # самых тяжёлых MEV-паттернов, загружаемых в фабрику ИИ
+pattern_synthetic = 0                    # сгенерированных эталонных паттернов, если хранилище не задано
+custom_bots = 0                          # чертежей пользовательских ботов от ИИ в поколении (0 = выкл.)
+custom_generations = 2                   # поколений конструктора (проектирование, компиляция, оценка, дообучение)
 
-# Brutal Aggressive Simulation: multi-block sandwich search on the capped pool (50-60% of CPUs).
+# Жёсткая агрессивная симуляция: многоблочный поиск сэндвичей на ограниченном пуле процессов (50-60% ядер CPU).
 [modes.brutal]
-workers = 0                              # worker processes (0 = automatic for the CPU policy)
-cpu_policy = "capped"                    # capped = 50-60% of CPUs, full = 100% of logical CPUs
-blocks = 6                               # blocks (slots) to simulate
-txs_per_block = 48                       # pending transactions per block
-frontrun_grid = 48                       # front-run sizes brute-forced per victim
-refine_iterations = 24                   # ternary-search refinement steps
-fuzz_iterations = 2000                   # invariant fuzz swaps
-layout_fuzz_iterations = 2048            # block layouts fuzzed per slot
-private_flow_bps = 3000                  # share of user swaps sent to the private relay (bps)
-router_max_hops = 4                      # longest route / cycle (1-6)
-rl_rounds = 3                            # parallel policy-iteration rounds
-rl_steps_per_shard = 64                  # RL steps per shard and round
-rl_eval_steps = 128                      # greedy RL evaluation steps
-shard_density = 1                        # multiplier on every fixed shard / chunk count
-pg_paths = 0                             # policy-gradient paths fuzzed concurrently
-pg_path_steps = 16                       # steps per policy-gradient path
-pg_batch = 32                            # paths per worker task
-agent_bots = 0                           # AI-generated competitor bots per generation (0 = off)
-agent_generations = 2                    # AI factory generations (synthesise, deploy, retrain)
-agent_heat_size = 8                      # AI bots per arena heat (one worker task)
-agent_heat_slots = 12                    # blocks each AI arena heat simulates
-pattern_seed_bps = 0                     # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
-pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
-pattern_synthetic = 0                    # generated reference patterns used when no pattern store is set
-custom_bots = 0                          # AI-designed custom bot blueprints per generation (0 = off)
-custom_generations = 2                   # custom builder generations (design, compile, score, retrain)
+workers = 0                              # рабочие процессы (0 = автоматически по политике CPU)
+cpu_policy = "capped"                    # capped = 50-60% ядер CPU, full = 100% логических ядер
+blocks = 6                               # число симулируемых блоков (слотов)
+txs_per_block = 48                       # ожидающих транзакций на блок
+frontrun_grid = 48                       # размеров фронтрана, перебираемых для каждой жертвы
+refine_iterations = 24                   # шагов уточнения тернарным поиском
+fuzz_iterations = 2000                   # свопов фаззинга инвариантов
+layout_fuzz_iterations = 2048            # раскладок блока, фаззимых на слот
+private_flow_bps = 3000                  # доля пользовательских свопов, отправляемых в приватный релей (bps)
+router_max_hops = 4                      # самый длинный маршрут / цикл (1-6)
+rl_rounds = 3                            # раундов параллельной итерации политики
+rl_steps_per_shard = 64                  # шагов RL на шард и раунд
+rl_eval_steps = 128                      # шагов жадной оценки RL
+shard_density = 1                        # множитель всех фиксированных чисел шардов / чанков
+pg_paths = 0                             # путей градиента политики, фаззимых параллельно
+pg_path_steps = 16                       # шагов на путь градиента политики
+pg_batch = 32                            # путей на задачу рабочего процесса
+agent_bots = 0                           # ИИ-ботов-конкурентов в поколении (0 = выкл.)
+agent_generations = 2                    # поколений фабрики ИИ (синтез, развёртывание, дообучение)
+agent_heat_size = 8                      # ИИ-ботов в заезде арены (одна задача процесса)
+agent_heat_slots = 12                    # блоков, симулируемых в каждом заезде арены
+pattern_seed_bps = 0                     # доля ИИ-ботов поколения 0 из MEV-паттернов (bps, 0 = выкл.)
+pattern_limit = 4096                     # самых тяжёлых MEV-паттернов, загружаемых в фабрику ИИ
+pattern_synthetic = 0                    # сгенерированных эталонных паттернов, если хранилище не задано
+custom_bots = 0                          # чертежей пользовательских ботов от ИИ в поколении (0 = выкл.)
+custom_generations = 2                   # поколений конструктора (проектирование, компиляция, оценка, дообучение)
 
-# MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz, AI agent factory.
+# MAX Brutal Simulation: без ограничения CPU (100% логических ядер), плотные шарды, фаззинг путей градиента политики, фабрика ИИ-агентов.
 [modes.max]
-workers = 0                              # worker processes (0 = automatic for the CPU policy)
-cpu_policy = "full"                      # capped = 50-60% of CPUs, full = 100% of logical CPUs
-blocks = 8                               # blocks (slots) to simulate
-txs_per_block = 64                       # pending transactions per block
-frontrun_grid = 64                       # front-run sizes brute-forced per victim
-refine_iterations = 32                   # ternary-search refinement steps
-fuzz_iterations = 8192                   # invariant fuzz swaps
-layout_fuzz_iterations = 4096            # block layouts fuzzed per slot
-private_flow_bps = 3000                  # share of user swaps sent to the private relay (bps)
-router_max_hops = 5                      # longest route / cycle (1-6)
-rl_rounds = 4                            # parallel policy-iteration rounds
-rl_steps_per_shard = 64                  # RL steps per shard and round
-rl_eval_steps = 256                      # greedy RL evaluation steps
-shard_density = 16                       # multiplier on every fixed shard / chunk count
-pg_paths = 4096                          # policy-gradient paths fuzzed concurrently
-pg_path_steps = 16                       # steps per policy-gradient path
-pg_batch = 32                            # paths per worker task
-agent_bots = 512                         # AI-generated competitor bots per generation (0 = off)
-agent_generations = 6                    # AI factory generations (synthesise, deploy, retrain)
-agent_heat_size = 8                      # AI bots per arena heat (one worker task)
-agent_heat_slots = 16                    # blocks each AI arena heat simulates
-pattern_seed_bps = 5000                  # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
-pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
-pattern_synthetic = 3072                 # generated reference patterns used when no pattern store is set
-custom_bots = 128                        # AI-designed custom bot blueprints per generation (0 = off)
-custom_generations = 4                   # custom builder generations (design, compile, score, retrain)
+workers = 0                              # рабочие процессы (0 = автоматически по политике CPU)
+cpu_policy = "full"                      # capped = 50-60% ядер CPU, full = 100% логических ядер
+blocks = 8                               # число симулируемых блоков (слотов)
+txs_per_block = 64                       # ожидающих транзакций на блок
+frontrun_grid = 64                       # размеров фронтрана, перебираемых для каждой жертвы
+refine_iterations = 32                   # шагов уточнения тернарным поиском
+fuzz_iterations = 8192                   # свопов фаззинга инвариантов
+layout_fuzz_iterations = 4096            # раскладок блока, фаззимых на слот
+private_flow_bps = 3000                  # доля пользовательских свопов, отправляемых в приватный релей (bps)
+router_max_hops = 5                      # самый длинный маршрут / цикл (1-6)
+rl_rounds = 4                            # раундов параллельной итерации политики
+rl_steps_per_shard = 64                  # шагов RL на шард и раунд
+rl_eval_steps = 256                      # шагов жадной оценки RL
+shard_density = 16                       # множитель всех фиксированных чисел шардов / чанков
+pg_paths = 4096                          # путей градиента политики, фаззимых параллельно
+pg_path_steps = 16                       # шагов на путь градиента политики
+pg_batch = 32                            # путей на задачу рабочего процесса
+agent_bots = 512                         # ИИ-ботов-конкурентов в поколении (0 = выкл.)
+agent_generations = 6                    # поколений фабрики ИИ (синтез, развёртывание, дообучение)
+agent_heat_size = 8                      # ИИ-ботов в заезде арены (одна задача процесса)
+agent_heat_slots = 16                    # блоков, симулируемых в каждом заезде арены
+pattern_seed_bps = 5000                  # доля ИИ-ботов поколения 0 из MEV-паттернов (bps, 0 = выкл.)
+pattern_limit = 4096                     # самых тяжёлых MEV-паттернов, загружаемых в фабрику ИИ
+pattern_synthetic = 3072                 # сгенерированных эталонных паттернов, если хранилище не задано
+custom_bots = 128                        # чертежей пользовательских ботов от ИИ в поколении (0 = выкл.)
+custom_generations = 4                   # поколений конструктора (проектирование, компиляция, оценка, дообучение)

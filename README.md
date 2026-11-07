@@ -35,6 +35,10 @@ code that is a model or an experiment. The table says which is which.
 | Strategy discovery | `strategy_discovery` | **experimental** search, **exact** replay | MAP-Elites search over action sequences; every saved strategy replays to the same wei |
 | Custom bot builder: compiler, VM, swap / victim / mint / burn / cycle legs | `custom_builder` | **exact** token amounts | legs run on `AttackState`; a compiled sandwich equals the hand-written one to the wei (`tests/test_custom_builder.py`) |
 | Custom bot builder: opcode traces, `bridge` legs, AI blueprint synthesis | `custom_builder` | **model** / **experimental** | opcode traces are a fixed pattern per pool version, not an EVM trace; the remote chain is another seeded scenario |
+| Code factory: generated `.py` bots, disk deployment, retraining | `code_factory` | **experimental** | arena P&L is exact wei; every file is digest-checked and AST allow-listed before it runs; `.sol` files are parameter records checked by the factory's own validator (no `solc` offline) |
+| ETH transaction graph | `tx_graph` | **exact** for the simulated block | every included tx is replayed on the parent state; edges must match the replayed balance and reserve deltas to the wei and the replayed state root must equal the sealed block's |
+| BTC transaction graph | `tx_graph` | **model** | synthetic seeded UTXO mempool; P2WPKH size estimate, BIP 125 rules 1/3/4 plus fee rate, ancestor-feerate block template; no real Bitcoin data |
+| Telemetry window / HTML dashboard | `gui` | tooling | `/proc/stat` deltas per core (load average fallback); charts are plain plans checked in tests |
 
 ### How the v3 math is verified
 
@@ -186,6 +190,54 @@ retrains on the best ones, and every trigger structure that no built-in
 template uses is listed under `custom_builder.novel_trigger_classes`. "Novel"
 means new to this design space, not a claim about real searchers.
 
+## Layer 15: code factory, transaction graph, telemetry, Russian UI
+
+**Code factory** (`code_factory`). The Layer 11 NumPy generator produces bot
+profiles; the factory writes each one to disk as an independent Python module
+(`bot_NNNN.py`: literal constants, one `SynthesizedBot` subclass, `build()`)
+and a Solidity parameter record (`bot_NNNN.sol`: a `library` of `uint256`
+constants, no functions). Writes are atomic and listed with SHA-256 digests in
+`manifest.json`. Arena heats then load the bots **from disk** in the worker
+processes (digest check, AST allow-list, compile), the Layer 04 builder decides
+who lands, the generator retrains on the elite and the files are rewritten for
+the next generation; the best bot of each generation is kept in `champions/`.
+`block_builder.generated_competitors()` / `run_generated_competition()` put the
+generated bots into a builder competition. Default directory:
+`src/simulator/generated_bots/` (not tracked by git), or `--bot-dir` /
+`$MEV_SIM_BOT_DIR`.
+
+**Transaction graph** (`tx_graph`). A versioned dataflow DAG: an account or
+pool gets a new node each time a transaction changes it, so the graph stays
+acyclic. ETH graphs replay a sealed block and flag value-conservation breaks,
+state-root mismatches, sandwiches (with the attacker's exact token gain),
+builder competition per victim (winning margin in wei, "photo finish" under a
+threshold) and evicted bundles. BTC graphs are built from a synthetic UTXO
+mempool and flag double spends, BIP 125 replacements, negative fees, unknown
+inputs, dust and CPFP packages, and build an ancestor-feerate block template.
+Layout: Kahn topological order, longest-path layers, barycentric crossing
+reduction. Output: one self-contained HTML page (zoom, pan, click to highlight
+upstream / downstream flow, exact amounts in tooltips).
+
+**Telemetry** (`gui`). `--monitor` opens a dark tkinter window (CustomTkinter
+if installed) with per-core CPU load, code synthesis speed and generator
+convergence, plus buttons for the factory, a MAX Brutal CPU stress on every
+core and the graph. `--monitor-html FILE` records the same while the factory
+runs and writes an HTML dashboard (no display needed).
+
+**Language.** Human-facing text is Russian by default: `sandwich.toml`
+comments, the settings editor, the telemetry window, HTML pages, factory logs
+and file headers, CLI help and error prefixes (`[ui] language`, `--lang en`
+or `$MEV_SIM_LANG` switch to English). JSON keys, TOML keys and flag names
+stay English so scripts keep working; argparse's own usage/error wording also
+stays English.
+
+```bash
+PYTHONPATH=src python -m simulator --code-factory --factory-bots 32 --factory-generations 4
+PYTHONPATH=src python -m simulator --tx-graph graph.html
+PYTHONPATH=src python -m simulator --monitor-html telemetry.html --stress-seconds 5
+PYTHONPATH=src python -m simulator --monitor            # needs tkinter and a display
+```
+
 ## What it does not do
 
 * No live data: no RPC, no mempool subscription, no real blocks, no
@@ -255,10 +307,19 @@ src/simulator/
   strategy_discovery.py local search for new attack compositions, strategy library      [experimental]
   custom_builder.py     blueprint schema, compiler, bytecode VM, AI blueprint synthesis   [exact legs, model traces]
   reinforcement_engine.py, path_fuzzer.py, ai_agent_factory.py, pattern_ingestor.py   [experimental]
+  code_factory.py       writes bots to disk (.py / .sol), deploys them from disk, retrains  [experimental]
+  tx_graph.py           BTC / ETH dataflow graphs, anomalies, interactive HTML    [ETH exact, BTC model]
+  gui.py, i18n.py       telemetry window / dashboard, Russian and English text
+  generated_bots/       default output of the code factory (git-ignored)
 tests/
   test_reference_vectors.py   Uniswap v2/v3 official vectors (335 test cases)
   test_protocol_rules.py      EIP-1559, nonces, out-of-gas, funding, replacement, v4 fees
   test_custom_builder.py      blueprint schema, VM semantics, exactness, thread contention
+  test_code_factory.py        generated-code allow-list, tamper rejection, disk deployment, determinism
+  test_tx_graph.py            topology and layout math, exact ETH replay, BIP 125, block template, HTML
+  test_gui_telemetry.py       CPU sampling math, thread-safe series, chart plans, dashboard
+  test_i18n.py                catalog completeness, Russian sandwich.toml / editor / CLI
+  test_layer15_stress.py      determinism with every core saturated
   vectors/                    converted v3-core swap snapshot
 tools/convert_v3_swap_snapshot.py
 ```

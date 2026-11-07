@@ -124,7 +124,7 @@ SAMPLES = {
     "agent_heat_slots": ("5", 5), "pattern_store": ("/tmp/mev-patterns", "/tmp/mev-patterns"),
     "pattern_max_storage_gb": ("100", 100), "pattern_segment_mb": ("8", 8), "pattern_cache_mb": ("32", 32),
     "pattern_seed_bps": ("2500", 2500), "pattern_limit": ("512", 512), "pattern_synthetic": ("64", 64),
-    "custom_bots": ("16", 16), "custom_generations": ("3", 3),
+    "custom_bots": ("16", 16), "custom_generations": ("3", 3), "language": ("en", "en"),
 }
 
 
@@ -1123,7 +1123,7 @@ def test_gui_form_post_saves_changed_values(gui, store):
     after = store.load()
     assert after.values[("trace", "enabled")] is True and after.values[("audit", "code_scan")] is False
     assert after.values[("modes.brutal", "blocks")] == 3
-    assert "Saved." in _request(gui, "/?saved=1")[1]
+    assert "Сохранено." in _request(gui, "/?saved=1")[1]  # Layer 15: the editor speaks Russian by default
 
 
 def test_gui_form_errors_and_stale_pages(gui, store, path):

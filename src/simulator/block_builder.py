@@ -2370,6 +2370,43 @@ def run_competition(parent: BuilderState, bundles: Sequence[Bundle], base_fee: i
     return CompetitionOutcome(block, post, winners, evicted, ranking)
 
 
+# ---------------------------------------------------------------------------
+# Layer 15: bots written to disk by the code factory
+# ---------------------------------------------------------------------------
+
+
+def generated_competitors(directory: Any = None, limit: Optional[int] = None) -> List[Any]:
+    """Bots the Layer 15 code factory wrote to ``directory`` (default: ``src/simulator/generated_bots``).
+
+    Every file is checked against the manifest digest and the code factory's
+    allow-list before it is compiled; the ``.sol`` parameter record must
+    round-trip to the same strategy. The bots have the :class:`CompetitorBot`
+    interface (``build``, ``observe``, ``searcher``).
+    """
+    from .code_factory import load_manifest_bots  # imported when used: code_factory depends on this module
+
+    return load_manifest_bots(directory, limit)
+
+
+def run_generated_competition(parent: BuilderState, victims: Sequence[BuilderTx], base_fee: int,
+                              directory: Any = None, bots: Optional[Sequence[Any]] = None,
+                              gas_limit: int = BLOCK_GAS_LIMIT, native: str = "WETH",
+                              trace: bool = True) -> Tuple[CompetitionOutcome, List[Bundle]]:
+    """Let generated bots (loaded from disk unless ``bots`` is given) bid on ``victims`` in one block.
+
+    Returns the builder's outcome (with ``rank=True``) and every bundle that was submitted.
+    """
+    roster = list(bots) if bots is not None else generated_competitors(directory)
+    bundles: List[Bundle] = []
+    for victim in victims:
+        for bot in roster:
+            b = bot.build(parent, victim, None, base_fee, native)
+            if b is not None:
+                bundles.append(b)
+    outcome = run_competition(parent, bundles, base_fee, victims, gas_limit=gas_limit, trace=trace, rank=True)
+    return outcome, bundles
+
+
 __all__ = [
     "BLOCK_GAS_LIMIT",
     "ETH",
@@ -2433,6 +2470,8 @@ __all__ = [
     "outbid_value",
     "quote_eviction",
     "run_competition",
+    "generated_competitors",
+    "run_generated_competition",
     "sandwich_economics",
     "score_bundle",
     "GWEI",

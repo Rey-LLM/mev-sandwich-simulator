@@ -90,6 +90,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
+from .i18n import LANGUAGES
+
 CPU_FLOOR_FRACTION = 0.5
 CPU_CEILING_FRACTION = 0.6
 FULL_CPU_FRACTION = 1.0
@@ -388,6 +390,8 @@ class SimulationConfig:
     audit_tick_samples: int = 256  # ticks sampled by the tick-arithmetic rounding checks
     trace: bool = False  # log every sealed block's tx trace
     trace_path: str = ""  # trace destination file; empty = stderr
+    # Layer 15: language of human-facing output (sandwich.toml comments, GUI, HTML charts, logs).
+    language: str = "ru"  # ru | en
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -458,6 +462,8 @@ class SimulationConfig:
             raise ConfigError("native_token must be a non-empty string")
         if not isinstance(self.trace_path, str):
             raise ConfigError("trace_path must be a string")
+        if self.language not in LANGUAGES:
+            raise ConfigError(f"language must be one of {', '.join(LANGUAGES)}")
 
     @property
     def gas_price_wei(self) -> int:
@@ -536,6 +542,7 @@ class SimulationConfig:
             "audit_tick_samples": self.audit_tick_samples,
             "trace": self.trace,
             "trace_path": self.trace_path,
+            "language": self.language,
         }
 
 

@@ -16,6 +16,7 @@ simulator in one place::
     [trace]           enabled, path
     [audit]           enabled, fail_on, code_scan, tick_samples
     [patterns]        store, max_storage_gb, segment_mb, cache_mb
+    [ui]              language (Layer 15: ru | en, Russian by default)
     [modes.moderate]  \
     [modes.brutal]     > the three run matrices (config.PRESETS) plus workers
     [modes.max]       /  (0 = automatic under the mode's CPU policy) and cpu_policy
@@ -78,6 +79,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+from . import i18n
 
 from .config import (
     AUDIT_LEVELS,
@@ -346,6 +349,9 @@ SETTINGS: Tuple[Setting, ...] = (
        "pattern segment file rotation size (MiB)", minimum=1, maximum=4_096),
     _s("pattern_cache_mb", "patterns", "cache_mb", int, ["--pattern-cache-mb"],
        "decoded pattern LRU cache budget (MiB)", minimum=0, maximum=1_048_576),
+    # [ui] (Layer 15)
+    _s("language", "ui", "language", str, ["--lang"], "language of the interface, logs and HTML charts: ru | en",
+       choices=i18n.LANGUAGES, normalize=i18n.normalize_language, lenient_choice=True),
     # [modes.<mode>]: the run matrices
     _s("workers", "modes", "workers", int, ["--workers"], "worker processes (0 = automatic for the CPU policy)",
        minimum=0, zero_means="auto"),
@@ -397,11 +403,11 @@ SETTINGS: Tuple[Setting, ...] = (
 )
 
 COMMON_TABLES: Tuple[str, ...] = ("run", "parallel", "gas", "search", "pbs", "private_relay", "rl", "trace", "audit",
-                                  "patterns")
+                                  "patterns", "ui")
 TABLE_TITLES: Dict[str, str] = {
     "meta": "Meta", "run": "Run", "parallel": "Parallel", "gas": "Gas", "search": "Sandwich search",
     "pbs": "PBS builders", "private_relay": "Private relay", "rl": "Reinforcement learning", "trace": "Trace output",
-    "audit": "Integrity audit", "patterns": "MEV pattern store", "modes": "Run matrices",
+    "audit": "Integrity audit", "patterns": "MEV pattern store", "ui": "Interface", "modes": "Run matrices",
 }
 BY_ATTR: Dict[str, Setting] = {s.attr: s for s in SETTINGS}
 COMMON_BY_LOCATION: Dict[Location, Setting] = {(s.table, s.key): s for s in SETTINGS if not s.per_mode}
@@ -890,29 +896,52 @@ def _key_line(key: str, value: Any, comment: str = "") -> str:
     return f"{line:<40} # {comment}" if comment else line
 
 
-def render_layout(values: Optional[Mapping[Location, Any]] = None, comments: bool = True) -> str:
-    """The canonical ``sandwich.toml`` layout; ``values`` override the defaults location by location."""
+def layout_language(values: Optional[Mapping[Location, Any]] = None, lang: Optional[str] = None) -> str:
+    """Language of the comments: ``lang``, else ``[ui] language`` from ``values``, else the default."""
+    if lang:
+        return i18n.normalize_language(lang)
+    configured = (values or {}).get(("ui", "language"))
+    if configured:
+        try:
+            return i18n.normalize_language(configured)
+        except ValueError:
+            pass  # validation reports a bad language; comments fall back to the default
+    return i18n.DEFAULT_LANGUAGE
+
+
+def localized_help(setting: Setting, lang: str) -> str:
+    """A setting's comment / help text in ``lang`` (English is the schema's own text)."""
+    return i18n.setting_help(setting.attr, setting.help, lang)
+
+
+def render_layout(values: Optional[Mapping[Location, Any]] = None, comments: bool = True,
+                  lang: Optional[str] = None) -> str:
+    """The canonical ``sandwich.toml`` layout; ``values`` override the defaults location by location.
+
+    Comments are written in ``lang``, else in the file's ``[ui] language`` (Russian by default).
+    """
     vals = default_locations()
     if values:
         vals.update(values)
-    out: List[str] = [HEADER] if comments else []
+    language = layout_language(vals, lang)
+    out: List[str] = [i18n.t("toml.header", language)] if comments else []
     out.append("[meta]")
     out.append(_key_line("schema_version", vals[("meta", "schema_version")],
-                         "layout version (written by the simulator)" if comments else ""))
+                         i18n.t("toml.schema_version", language) if comments else ""))
     for table in COMMON_TABLES:
         out.append("")
         out.append(f"[{table}]")
         for s in SETTINGS:
             if s.table == table:
-                out.append(_key_line(s.key, vals[s.location()], s.help if comments else ""))
+                out.append(_key_line(s.key, vals[s.location()], localized_help(s, language) if comments else ""))
     for mode in MODE_NAMES:
         out.append("")
         if comments:
-            out.append(f"# {MODE_NOTES[mode]}")
+            out.append(f"# {i18n.mode_note(mode, language)}")
         out.append(f"[modes.{mode}]")
         for s in SETTINGS:
             if s.per_mode:
-                out.append(_key_line(s.key, vals[s.location(mode)], s.help if comments else ""))
+                out.append(_key_line(s.key, vals[s.location(mode)], localized_help(s, language) if comments else ""))
     return "\n".join(out) + "\n"
 
 
@@ -1164,7 +1193,17 @@ def _scan_layout(text: str) -> _Layout:
     return _Layout(lines, tables, keys)
 
 
-def apply_patch(text: str, patch: Mapping[Location, Any], comments: bool = True) -> str:
+def text_language(text: str, lang: Optional[str] = None) -> str:
+    """Language for comments inserted into ``text``: ``lang``, else Russian when the file already has Cyrillic,
+    English for an existing non-Russian file, and the default for an empty one."""
+    if lang:
+        return i18n.normalize_language(lang)
+    if re.search(r"[\u0400-\u04FF]", text):
+        return "ru"
+    return "en" if text.strip() else i18n.DEFAULT_LANGUAGE
+
+
+def apply_patch(text: str, patch: Mapping[Location, Any], comments: bool = True, lang: Optional[str] = None) -> str:
     """Set ``patch`` values in ``text``, editing only the value text of existing keys.
 
     Missing keys are inserted after the last key of their table; missing
@@ -1172,6 +1211,7 @@ def apply_patch(text: str, patch: Mapping[Location, Any], comments: bool = True)
     comments and key order are preserved.
     """
     newline = "\r\n" if "\r\n" in text else "\n"
+    language = text_language(text, lang)
     layout = _scan_layout(text)
     lines = list(layout.lines)
     inserts: Dict[int, List[str]] = {}
@@ -1179,7 +1219,7 @@ def apply_patch(text: str, patch: Mapping[Location, Any], comments: bool = True)
     for (table, key), value in patch.items():
         setting_help = ""
         if table != "meta":
-            setting_help = lookup(table, key).help if comments else ""
+            setting_help = localized_help(lookup(table, key), language) if comments else ""
         idx = layout.keys.get((table, key))
         if idx is not None:
             m = _KEY_LINE.match(lines[idx])
@@ -1215,7 +1255,7 @@ def apply_patch(text: str, patch: Mapping[Location, Any], comments: bool = True)
         if out:
             out.append("")
         if comments and table.startswith("modes.") and table.split(".", 1)[1] in MODE_NOTES:
-            out.append(f"# {MODE_NOTES[table.split('.', 1)[1]]}")
+            out.append(f"# {i18n.mode_note(table.split('.', 1)[1], language)}")
         out.append(f"[{table}]")
         out.extend(appended[table])
     result = newline.join(out)
@@ -1688,9 +1728,10 @@ def render_effective(cfg: SimulationConfig, file_values: Optional[Mapping[Locati
     """``--show-config`` output: the layout with the effective values of the active mode."""
     values: Dict[Location, Any] = dict(file_values or {})
     values.update(config_locations(cfg))
-    head = (f"# Effective settings: {cfg.mode.label}, {cfg.workers} worker(s) under the "
-            f"{cfg.cpu_policy} CPU policy.\n")
-    return head + render_layout(values)
+    language = layout_language(values)
+    head = "# " + i18n.t("toml.effective", language, mode=i18n.mode_label(cfg.mode.value, language),
+                         workers=cfg.workers, policy=cfg.cpu_policy) + "\n"
+    return head + render_layout(values, lang=language)
 
 
 # ---------------------------------------------------------------------------
@@ -1699,13 +1740,16 @@ def render_effective(cfg: SimulationConfig, file_values: Optional[Mapping[Locati
 
 
 def add_setting_arguments(parser: argparse.ArgumentParser) -> None:
-    """One flag per setting (defaults None so that only flags actually given count)."""
+    """One flag per setting (defaults None so that only flags actually given count); help in the
+    language :func:`simulator.i18n.resolve_language` picks."""
     groups: Dict[str, Any] = {}
+    language = i18n.resolve_language()
     for s in SETTINGS:
-        title = TABLE_TITLES["modes" if s.per_mode else s.table]
+        title = i18n.table_title("modes" if s.per_mode else s.table, language)
         group = groups.setdefault(title, parser.add_argument_group(title))
         # argparse %-formats help strings, so a literal "%" in a setting's help must be escaped.
-        kwargs: Dict[str, Any] = {"dest": s.dest, "default": None, "help": s.help.replace("%", "%%")}
+        kwargs: Dict[str, Any] = {"dest": s.dest, "default": None,
+                                  "help": localized_help(s, language).replace("%", "%%")}
         if s.kind is bool:
             kwargs["action"] = argparse.BooleanOptionalAction
         else:
@@ -1737,14 +1781,24 @@ def values_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
-def form_schema() -> Dict[str, Any]:
-    """Description of every setting for a GUI form: common sections plus the per-mode matrix."""
+def form_schema(lang: Optional[str] = None) -> Dict[str, Any]:
+    """Description of every setting for a GUI form: common sections plus the per-mode matrix.
+
+    ``title`` / ``help`` stay in English (the schema's reference text); ``title_local`` /
+    ``help_local`` carry the text in ``lang`` (Russian by default).
+    """
+    language = i18n.resolve_language(lang)
+
+    def field(s: Setting, default: Any) -> Dict[str, Any]:
+        return {**s.to_form(default), "help_local": localized_help(s, language)}
+
     sections = []
     for table in COMMON_TABLES:
         sections.append({
             "table": table,
             "title": TABLE_TITLES[table],
-            "fields": [s.to_form(default_value(s)) for s in SETTINGS if s.table == table],
+            "title_local": i18n.table_title(table, language),
+            "fields": [field(s, default_value(s)) for s in SETTINGS if s.table == table],
         })
     per_mode = [s for s in SETTINGS if s.per_mode]
     return {
@@ -1754,8 +1808,12 @@ def form_schema() -> Dict[str, Any]:
         "sections": sections,
         "modes": {
             "title": TABLE_TITLES["modes"],
-            "columns": [{"mode": m, "label": RunMode.parse(m).label, "note": MODE_NOTES[m]} for m in MODE_NAMES],
-            "fields": [s.to_form(None) for s in per_mode],
+            "title_local": i18n.table_title("modes", language),
+            "language": language,
+            "columns": [{"mode": m, "label": RunMode.parse(m).label, "note": MODE_NOTES[m],
+                         "label_local": i18n.mode_label(m, language), "note_local": i18n.mode_note(m, language)}
+                        for m in MODE_NAMES],
+            "fields": [field(s, None) for s in per_mode],
             "presets": {m: {s.key: default_value(s, m) for s in per_mode} for m in MODE_NAMES},
         },
     }

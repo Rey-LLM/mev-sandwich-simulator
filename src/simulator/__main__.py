@@ -48,6 +48,21 @@ Custom bot builder (Layer 14):
 ``--bot-template NAME``   the same for a built-in template (``--bot-templates`` lists them)
 ``--blueprint-schema``    print the blueprint schema (metrics, events, opcodes, actions)
 
+Layer 15 (code factory, transaction graph, telemetry):
+
+``--code-factory``        write bot sources (.py / .sol) to ``--bot-dir``, deploy them from
+                          disk in arena heats, retrain the generator and rewrite the files
+                          (``--factory-bots``, ``--factory-generations``)
+``--tx-graph FILE``       write the interactive BTC / ETH transaction graph (HTML)
+``--monitor``             open the telemetry window (tkinter / CustomTkinter)
+``--monitor-html FILE``   record telemetry during a code factory run (``--stress-seconds``
+                          adds a MAX Brutal CPU stress) and write an HTML dashboard
+
+Human-facing text (settings comments, the settings editor, the telemetry
+window, HTML pages, factory logs, CLI help and error prefixes) is Russian by
+default; ``--lang en``, ``$MEV_SIM_LANG`` or ``[ui] language`` switch it.
+JSON output keys stay English.
+
 Exit codes: 0 success; 1 an invariant failed during the run; 2 invalid
 settings, a settings file that cannot be read or written safely, or a
 blocking integrity-audit finding.
@@ -61,6 +76,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
+from . import i18n
 from .config import ConfigError, SimulationConfig
 from .config_sync import (
     CONFIG_FILENAME,
@@ -89,8 +105,7 @@ EXIT_SETTINGS = 2
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="simulator",
-        description="Offline MEV sandwich simulator. Settings come from the mode preset, sandwich.toml, "
-                    "$MEV_SIM_WORKERS, --set and the flags below, in that order.",
+        description=i18n.t("cli.description"),
     )
     files = parser.add_argument_group("Settings file")
     source = files.add_mutually_exclusive_group()
@@ -136,6 +151,17 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--bot-template", metavar="NAME", help="compile and run a built-in blueprint template")
     actions.add_argument("--bot-templates", action="store_true", help="list the built-in blueprint templates")
     actions.add_argument("--blueprint-schema", action="store_true", help="print the custom bot blueprint schema")
+    actions.add_argument("--code-factory", action="store_true", help=i18n.t("cli.code_factory"))
+    actions.add_argument("--tx-graph", metavar="FILE", help=i18n.t("cli.tx_graph"))
+    actions.add_argument("--monitor", action="store_true", help=i18n.t("cli.monitor"))
+    actions.add_argument("--monitor-html", metavar="FILE", help=i18n.t("cli.monitor_html"))
+    l15 = parser.add_argument_group(i18n.t("cli.group.layer15"))
+    l15.add_argument("--bot-dir", metavar="DIR", help=i18n.t("cli.bot_dir"))
+    l15.add_argument("--factory-bots", type=int, default=16, metavar="N", help=i18n.t("cli.factory_bots"))
+    l15.add_argument("--factory-generations", type=int, default=3, metavar="N",
+                     help=i18n.t("cli.factory_generations"))
+    l15.add_argument("--stress-seconds", type=float, default=0.0, metavar="S",
+                     help="--monitor-html: MAX Brutal Simulation CPU stress (s)")
     disc = parser.add_argument_group("Attack catalog and strategy discovery")
     disc.add_argument("--scenario-victims", type=int, default=10, metavar="N",
                       help="pending victim swaps per generated scenario (default 10)")
@@ -151,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _dump(data: Any, out: TextIO) -> None:
-    json.dump(data, out, indent=2, default=str)
+    json.dump(data, out, indent=2, default=str, ensure_ascii=False)
     out.write("\n")
 
 
@@ -180,7 +206,7 @@ def _cli_values(args: argparse.Namespace, file_values: Dict[Location, Any]) -> D
 
 def _warn(issues: List[Any], err: TextIO) -> None:
     for issue in issues:
-        err.write(f"simulator: warning: {issue}\n")
+        err.write(i18n.t("cli.warning", message=issue) + "\n")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -193,7 +219,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         err.write(f"simulator: {exc}\n")
         return EXIT_SETTINGS
     except (ConfigError, SettingsFileError) as exc:  # SettingsError is a ConfigError
-        err.write(f"simulator: error: {exc}\n")
+        err.write(i18n.t("cli.error", message=exc) + "\n")
         return EXIT_SETTINGS
 
 
@@ -270,6 +296,8 @@ def _main(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
     if args.build_bot or args.bot_template or args.bot_templates or args.blueprint_schema:
         return _builder_action(args, cfg, out)
+    if args.code_factory or args.tx_graph or args.monitor or args.monitor_html:
+        return _layer15_action(args, cfg, out)
 
     controller = SimulationController(cfg)
     try:
@@ -365,6 +393,48 @@ def _builder_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO
     best = run.best
     _dump({"blueprint": normalize_blueprint(raw), "class": type(bot).__name__, "run": run.summary(),
            "best_plan": best.to_dict() if best is not None else None, "bytecode": bot.disassemble()}, out)
+    return EXIT_OK
+
+
+def _layer15_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO) -> int:
+    lang = cfg.language
+    if args.factory_bots < 1 or args.factory_generations < 1:
+        raise ConfigError("--factory-bots and --factory-generations must be >= 1")
+    factory_kwargs: Dict[str, Any] = dict(directory=args.bot_dir, bots=args.factory_bots,
+                                          generations=args.factory_generations, seed=cfg.seed, regime=cfg.rl_regime,
+                                          base_fee_wei=cfg.base_fee_wei, gas_limit=cfg.block_gas_limit)
+    if args.code_factory:
+        from .code_factory import CodeFactory
+
+        logs: List[str] = []
+        factory = CodeFactory(lang=lang, listener=lambda e: logs.append(e["message"]) if "message" in e else None,
+                              **factory_kwargs)
+        with WorkerPool.for_config(cfg) as wp:
+            report = factory.run(executor=wp)
+        _dump({"code_factory": report.summary(), "log": logs}, out)
+        return EXIT_OK if report.ok else EXIT_INVARIANT
+    if args.tx_graph:
+        from .gui import run_graph_task
+
+        result = run_graph_task(args.tx_graph, seed=cfg.seed, lang=lang)
+        _dump(result, out)
+        bad = [a for g in ("eth", "btc") for a, n in result[g]["anomalies"].items()
+               if a in ("conservation", "state_root", "negative_fee", "missing_input") and n]
+        return EXIT_INVARIANT if bad else EXIT_OK
+    if args.monitor_html:
+        from .gui import record_dashboard
+
+        if args.stress_seconds < 0:
+            raise ConfigError("--stress-seconds must be >= 0")
+        _dump(record_dashboard(args.monitor_html, lang=lang, stress_seconds=args.stress_seconds,
+                               **factory_kwargs), out)
+        return EXIT_OK
+    from .gui import launch
+
+    try:
+        launch(lang, factory_kwargs=factory_kwargs)
+    except RuntimeError as exc:
+        raise ConfigError(str(exc)) from exc
     return EXIT_OK
 
 

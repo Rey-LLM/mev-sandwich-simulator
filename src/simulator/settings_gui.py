@@ -44,7 +44,6 @@ from .config_sync import (
     COMMON_TABLES,
     MODE_NAMES,
     SETTINGS,
-    TABLE_TITLES,
     Location,
     Setting,
     SettingsConflictError,
@@ -58,7 +57,7 @@ from .config_sync import (
     form_schema,
     lookup,
 )
-from .config import RunMode
+from . import i18n
 
 MAX_BODY = 256 * 1024
 TOKEN_HEADER = "X-Settings-Token"
@@ -162,43 +161,58 @@ def _input(setting: Setting, name: str, value: Any) -> str:
     return f'<input type="text" id="{esc(name)}" name="{esc(name)}" value="{esc(str(value))}">'
 
 
+def page_language(shown: Mapping[Location, Any], lang: Optional[str] = None) -> str:
+    """Language of the page: ``lang`` > ``$MEV_SIM_LANG`` > the file's ``[ui] language`` > Russian."""
+    return i18n.resolve_language(lang, str(shown.get(("ui", "language")) or ""))
+
+
 def render_page(store: SettingsStore, doc: SettingsDocument, token: str, values: Optional[Mapping[Location, Any]] = None,
-                errors: Optional[List[str]] = None, saved: bool = False) -> str:
+                errors: Optional[List[str]] = None, saved: bool = False, lang: Optional[str] = None) -> str:
     esc = html.escape
     shown = dict(current_values(doc))
     if values:
         shown.update(values)
-    parts = [f"<!doctype html><html lang=en><head><meta charset=utf-8>"
-             f'<meta name=viewport content="width=device-width,initial-scale=1"><title>Simulator settings</title>'
+    lg = page_language(shown, lang)
+
+    def tr(key: str, **params: Any) -> str:
+        return i18n.t(key, lg, **params)
+
+    def helptext(s: Setting) -> str:
+        return i18n.setting_help(s.attr, s.help, lg)
+
+    status = tr("editor.saved_as", digest=doc.digest[:12]) if doc.exists else tr("editor.not_created")
+    parts = [f"<!doctype html><html lang={lg}><head><meta charset=utf-8>"
+             f'<meta name=viewport content="width=device-width,initial-scale=1"><title>{esc(tr("editor.title"))}</title>'
              f"<style>{_CSS}</style></head><body><main>",
-             "<h1>Simulator settings</h1>",
-             f'<p class=sub><code>{esc(str(store.path))}</code> &middot; '
-             f'{"saved as " + doc.digest[:12] if doc.exists else "not created yet (saving creates it)"}</p>']
+             f"<h1>{esc(tr('editor.title'))}</h1>",
+             f'<p class=sub><code>{esc(str(store.path))}</code> &middot; {esc(status)}</p>']
     if errors:
         items = "".join(f"<li>{esc(e)}</li>" for e in errors)
-        parts.append(f'<div class="msg err" role=alert><strong>Not saved.</strong><ul>{items}</ul></div>')
+        parts.append(f'<div class="msg err" role=alert><strong>{esc(tr("editor.not_saved"))}</strong>'
+                     f"<ul>{items}</ul></div>")
     elif saved:
-        parts.append('<div class="msg ok" role=status>Saved.</div>')
+        parts.append(f'<div class="msg ok" role=status>{esc(tr("editor.saved"))}</div>')
     parts.append(f'<form method=post action="/"><input type=hidden name=_token value="{esc(token)}">'
                  f'<input type=hidden name=_digest value="{esc(doc.digest)}">')
     for table in COMMON_TABLES:
-        parts.append(f"<section><h2>{esc(TABLE_TITLES[table])}</h2><div class=grid>")
+        parts.append(f"<section><h2>{esc(i18n.table_title(table, lg))}</h2><div class=grid>")
         for s in SETTINGS:
             if s.table != table:
                 continue
             name = _dotted(s.location())
             parts.append(f'<div><label for="{esc(name)}">{esc(s.key)}</label>{_input(s, name, shown[s.location()])}'
-                         f"<small>{esc(s.help)} &middot; <code>{esc(name)}</code></small></div>")
+                         f"<small>{esc(helptext(s))} &middot; <code>{esc(name)}</code></small></div>")
         parts.append("</div></section>")
-    head = "".join(f"<th>{esc(RunMode.parse(m).label)}</th>" for m in MODE_NAMES)
-    parts.append(f"<section><h2>{esc(TABLE_TITLES['modes'])}</h2><div class=matrix><table>"
-                 f"<thead><tr><th>Setting</th>{head}</tr></thead><tbody>")
+    head = "".join(f"<th>{esc(i18n.mode_label(m, lg))}</th>" for m in MODE_NAMES)
+    parts.append(f"<section><h2>{esc(i18n.table_title('modes', lg))}</h2><div class=matrix><table>"
+                 f"<thead><tr><th>{esc(tr('editor.setting'))}</th>{head}</tr></thead><tbody>")
     for s in SETTINGS:
         if not s.per_mode:
             continue
         cells = "".join(f"<td>{_input(s, _dotted(s.location(m)), shown[s.location(m)])}</td>" for m in MODE_NAMES)
-        parts.append(f"<tr><th>{esc(s.key)}<small>{esc(s.help)}</small></th>{cells}</tr>")
-    parts.append("</tbody></table></div></section><button type=submit>Save</button></form></main></body></html>")
+        parts.append(f"<tr><th>{esc(s.key)}<small>{esc(helptext(s))}</small></th>{cells}</tr>")
+    parts.append(f"</tbody></table></div></section><button type=submit>{esc(tr('editor.save'))}</button></form>"
+                 "</main></body></html>")
     return "".join(parts)
 
 

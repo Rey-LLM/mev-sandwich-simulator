@@ -73,6 +73,14 @@ with transient storage, conditionals, unrolled loops, atomic rollback blocks
 and delayed cross-chain legs; a compiler to forward-only bytecode and one
 runtime class per blueprint; and a NumPy blueprint synthesizer driven by
 ``ai_agent_factory`` that runs on the MAX worker pool).
+
+Layer 15 (0.16.0): ``code_factory`` (writes generated bots to disk as
+Python modules and Solidity parameter records, deploys them from disk -
+digest-checked and AST allow-listed - in arena heats, retrains the generator
+and rewrites the files), ``tx_graph`` (versioned BTC / ETH dataflow DAGs with
+exact flows, competition and replacement anomalies, layered layout and an
+interactive HTML view), ``gui`` (telemetry window and HTML dashboard: per-core
+CPU load, synthesis speed, convergence) and ``i18n`` (Russian by default).
 """
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
