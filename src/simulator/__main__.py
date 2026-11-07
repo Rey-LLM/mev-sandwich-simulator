@@ -32,6 +32,14 @@ MEV pattern store actions (Layer 12; the store is ``[patterns] store`` /
 ``--export-patterns FILE``          write the store as normalised JSONL
 ``--pattern-source NAME``           force the parser for ``--ingest-patterns``
 
+Attack catalog and strategy discovery (Layer 13):
+
+``--attack-catalog``      run every attack type on a seeded scenario (``--scenario-victims``)
+``--discover``            search for new attack compositions (``--generations``,
+                          ``--population``) and save novel ones to the local library
+``--strategies``          list the local strategy library (``--strategy-dir``)
+``--verify-strategies``   replay every stored strategy and check its profit to the wei
+
 Exit codes: 0 success; 1 an invariant failed during the run; 2 invalid
 settings, a settings file that cannot be read or written safely, or a
 blocking integrity-audit finding.
@@ -107,6 +115,22 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--pattern-verify", action="store_true",
                          help="check every pattern segment frame against the index")
     actions.add_argument("--export-patterns", metavar="FILE", help="export the pattern store as JSONL")
+    actions.add_argument("--attack-catalog", action="store_true",
+                         help="run every attack type (sandwich, multi-victim, JIT, back-run arbitrage, "
+                              "liquidation back-run, oracle manipulation) on a seeded scenario")
+    actions.add_argument("--discover", action="store_true",
+                         help="search for new attack compositions and save the novel ones to the local library")
+    actions.add_argument("--strategies", action="store_true", help="list the local strategy library")
+    actions.add_argument("--verify-strategies", action="store_true",
+                         help="replay every stored strategy and check its profit to the wei")
+    disc = parser.add_argument_group("Attack catalog and strategy discovery")
+    disc.add_argument("--scenario-victims", type=int, default=10, metavar="N",
+                      help="pending victim swaps per generated scenario (default 10)")
+    disc.add_argument("--generations", type=int, default=40, help="discovery generations (default 40)")
+    disc.add_argument("--population", type=int, default=64, help="candidates per generation (default 64)")
+    disc.add_argument("--strategy-dir", metavar="DIR",
+                      help="local strategy library (default $MEV_SIM_STRATEGY_DIR, else ~/.mev_sim/strategies)")
+    disc.add_argument("--no-save", action="store_true", help="--discover: report only, write nothing")
     files.add_argument("--pattern-source", choices=("flashbots_blocks", "mev_inspect", "advisory", "normalized"),
                        help="parser for --ingest-patterns (default: detected per object)")
     add_setting_arguments(parser)
@@ -228,6 +252,9 @@ def _main(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             or args.pattern_verify or args.export_patterns):
         return _pattern_action(args, cfg, out, err)
 
+    if args.attack_catalog or args.discover or args.strategies or args.verify_strategies:
+        return _strategy_action(args, cfg, out)
+
     controller = SimulationController(cfg)
     try:
         report = controller.run()
@@ -269,6 +296,31 @@ def _pattern_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO
         else:
             n = write_jsonl(store.records(), args.export_patterns)
             _dump({"exported": n, "file": args.export_patterns}, out)
+    return EXIT_OK
+
+
+def _strategy_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO) -> int:
+    from .attack_vectors import build_scenario, run_attack_catalog
+    from .strategy_discovery import DiscoveryEngine, StrategyLibrary
+
+    if args.scenario_victims < 0 or args.generations < 0 or args.population <= 0:
+        raise ConfigError("--scenario-victims and --generations must be >= 0, --population > 0")
+    library = StrategyLibrary(args.strategy_dir)
+    if args.attack_catalog:
+        _dump(run_attack_catalog(build_scenario(cfg.seed, args.scenario_victims)), out)
+        return EXIT_OK
+    if args.strategies:
+        _dump({"path": str(library.path), "strategies": library.summary()}, out)
+        return EXIT_OK
+    if args.verify_strategies:
+        report = library.verify()
+        _dump(report, out)
+        return EXIT_OK if report["ok"] else EXIT_INVARIANT
+    engine = DiscoveryEngine(seed=cfg.seed, generations=args.generations, population=args.population,
+                             victims=args.scenario_victims)
+    with WorkerPool.for_config(cfg) as wp:
+        report = engine.run(executor=wp, library=None if args.no_save else library)
+    _dump(report.to_dict(), out)
     return EXIT_OK
 
 

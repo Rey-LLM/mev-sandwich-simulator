@@ -58,6 +58,13 @@ initialized, so it matches all 240 v3-core pool-swap scenarios to the wei
 and after-gas sandwich accounting follow the protocol rules; the builder has
 an opt-in ``strict_balances`` funding mode. See README.md for what is
 reference-checked, what is a model and what is experimental.
+
+Layer 13 (0.14.0): ``attack_vectors`` (multi-victim sandwich, JIT liquidity
+with exact v3 mint / burn rounding and fee growth, back-run cycle arbitrage,
+liquidation back-run and spot-vs-TWAP oracle manipulation on a lending model)
+and ``strategy_discovery`` (MAP-Elites search over primitive action genomes
+that finds attack compositions outside the predefined templates, minimises
+and labels them, and keeps them in a local, replay-verified JSONL library).
 """
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
