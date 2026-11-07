@@ -124,6 +124,7 @@ SAMPLES = {
     "agent_heat_slots": ("5", 5), "pattern_store": ("/tmp/mev-patterns", "/tmp/mev-patterns"),
     "pattern_max_storage_gb": ("100", 100), "pattern_segment_mb": ("8", 8), "pattern_cache_mb": ("32", 32),
     "pattern_seed_bps": ("2500", 2500), "pattern_limit": ("512", 512), "pattern_synthetic": ("64", 64),
+    "custom_bots": ("16", 16), "custom_generations": ("3", 3),
 }
 
 

@@ -65,6 +65,14 @@ liquidation back-run and spot-vs-TWAP oracle manipulation on a lending model)
 and ``strategy_discovery`` (MAP-Elites search over primitive action genomes
 that finds attack compositions outside the predefined templates, minimises
 and labels them, and keeps them in a local, replay-verified JSONL library).
+
+Layer 14 (0.15.0): ``custom_builder`` (custom bot architecture builder: a
+validated JSON blueprint schema with nested trigger trees over victim
+metrics, modelled opcode traces and event listeners; a nested action script
+with transient storage, conditionals, unrolled loops, atomic rollback blocks
+and delayed cross-chain legs; a compiler to forward-only bytecode and one
+runtime class per blueprint; and a NumPy blueprint synthesizer driven by
+``ai_agent_factory`` that runs on the MAX worker pool).
 """
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"

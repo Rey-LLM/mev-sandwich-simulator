@@ -83,6 +83,8 @@ from .config import (
     AUDIT_LEVELS,
     MAX_AGENT_BOTS,
     MAX_AGENT_GENERATIONS,
+    MAX_CUSTOM_BOTS,
+    MAX_CUSTOM_GENERATIONS,
     MAX_PATTERN_LIMIT,
     MAX_PATTERN_STORAGE_GB,
     MAX_PATTERN_SYNTHETIC,
@@ -388,6 +390,10 @@ SETTINGS: Tuple[Setting, ...] = (
        "heaviest MEV patterns loaded into the AI factory", minimum=0, maximum=MAX_PATTERN_LIMIT),
     _s("pattern_synthetic", "modes", "pattern_synthetic", int, ["--pattern-synthetic"],
        "generated reference patterns used when no pattern store is set", minimum=0, maximum=MAX_PATTERN_SYNTHETIC),
+    _s("custom_bots", "modes", "custom_bots", int, ["--custom-bots"],
+       "AI-designed custom bot blueprints per generation (0 = off)", minimum=0, maximum=MAX_CUSTOM_BOTS),
+    _s("custom_generations", "modes", "custom_generations", int, ["--custom-generations"],
+       "custom builder generations (design, compile, score, retrain)", minimum=1, maximum=MAX_CUSTOM_GENERATIONS),
 )
 
 COMMON_TABLES: Tuple[str, ...] = ("run", "parallel", "gas", "search", "pbs", "private_relay", "rl", "trace", "audit",

@@ -1,4 +1,4 @@
-"""Layers 03-12: simulation controller.
+"""Layers 03-14: simulation controller.
 
 ``SimulationController`` is the single entry point that dispatches a run to
 the mode chosen in :class:`SimulationConfig`, owns the worker pool for the
@@ -36,6 +36,12 @@ Run matrices:
   store it builds a temporary store of ``pattern_synthetic`` generated
   reference patterns. The ``agent_factory`` section then carries
   ``pattern_ingestion`` and ``patterns``.
+* Layer 14: when ``custom_bots > 0`` (MAX preset), :func:`run_custom_builder`
+  hands the RL features to the factory's blueprint synthesizer, which designs
+  ``custom_bots`` complete custom bots per generation (trigger trees, action
+  scripts, pipelines), compiles them with :mod:`simulator.custom_builder` and
+  scores them in fixed batches on the same full-core pool for
+  ``custom_generations`` generations (``custom_builder`` section).
 
 Every report carries ``audit`` (the pre-flight result) and ``resources``
 (worker-pool telemetry: processes, tasks, CPU seconds and utilization).
@@ -67,6 +73,7 @@ from .validator import AuditReport, IntegrityError, IntegrityValidator
 E18 = 10**18
 E6 = 10**6
 PATTERN_SHARDS = 4  # pattern-store scan shards per unit of shard_density
+CUSTOM_SCENARIOS = 2  # seeded scenarios every custom blueprint is scored on
 TRACE_LOGGER = "simulator.block_builder"
 
 
@@ -129,6 +136,7 @@ def invariants_ok(report: Mapping[str, Any]) -> bool:
         and result.get("private_relay", {}).get("invariants_ok", True)
         and result.get("policy_paths", {}).get("invariants", {}).get("ok", True)
         and result.get("agent_factory", {}).get("invariants", {}).get("ok", True)
+        and result.get("custom_builder", {}).get("invariants", {}).get("ok", True)
     )
 
 
@@ -178,6 +186,8 @@ class SimulationController:
                     ).run(executor=wp).summary()
                 if cfg.agent_bots > 0:
                     body["agent_factory"] = run_agent_factory(cfg, wp, body, rl)
+                if cfg.custom_bots > 0:
+                    body["custom_builder"] = run_custom_builder(cfg, wp, body, rl)
             router = MultiHopRouter(pools, cfg.native_token, cfg.router_max_hops)
             body["router"] = router.scan_cycles(executor=wp, gas_price_wei=cfg.gas_price_wei,
                                                 chunks=cfg.shards(ROUTER_CHUNKS)).summary()
@@ -207,6 +217,18 @@ def run_agent_factory(cfg: SimulationConfig, executor: Optional[WorkerPool], bod
     if ingestion:
         summary["pattern_ingestion"] = ingestion
     return summary
+
+
+def run_custom_builder(cfg: SimulationConfig, executor: Optional[WorkerPool], body: Mapping[str, Any],
+                       rl: Optional[ReinforcementSimulation] = None) -> Dict[str, Any]:
+    """Layer 14: the AI factory's generator, conditioned on the RL results, designs and scores custom bots."""
+    from .ai_agent_factory import AgentFactory  # NumPy is only needed when the builder runs
+
+    factory = AgentFactory.for_config(cfg)
+    table = rl.last_train.table if rl is not None and rl.last_train is not None else None
+    factory.ingest(reinforcement=body.get("reinforcement"), table=table, policy_paths=body.get("policy_paths"))
+    return factory.synthesize_custom_bots(cfg.custom_bots, cfg.custom_generations, executor=executor,
+                                          scenario_seeds=CUSTOM_SCENARIOS)
 
 
 def ingest_patterns(cfg: SimulationConfig, factory: Any, executor: Optional[WorkerPool]) -> Dict[str, Any]:
@@ -241,6 +263,6 @@ def run(mode: Any = RunMode.MODERATE_SCAN, **overrides: Any) -> Dict[str, Any]:
     return SimulationController(SimulationConfig.for_mode(mode, workers=workers, **overrides)).run()
 
 
-__all__ = ["PATTERN_SHARDS", "TRACE_LOGGER", "SimulationController", "demo_market", "ingest_patterns", "invariants_ok",
-           "run", "run_agent_factory",
+__all__ = ["CUSTOM_SCENARIOS", "PATTERN_SHARDS", "TRACE_LOGGER", "SimulationController", "demo_market", "ingest_patterns", "invariants_ok",
+           "run", "run_agent_factory", "run_custom_builder",
            "trace_logging"]

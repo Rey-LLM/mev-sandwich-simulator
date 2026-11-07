@@ -81,6 +81,8 @@ agent_heat_slots = 12                    # blocks each AI arena heat simulates
 pattern_seed_bps = 0                     # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
 pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
 pattern_synthetic = 0                    # generated reference patterns used when no pattern store is set
+custom_bots = 0                          # AI-designed custom bot blueprints per generation (0 = off)
+custom_generations = 2                   # custom builder generations (design, compile, score, retrain)
 
 # Brutal Aggressive Simulation: multi-block sandwich search on the capped pool (50-60% of CPUs).
 [modes.brutal]
@@ -108,6 +110,8 @@ agent_heat_slots = 12                    # blocks each AI arena heat simulates
 pattern_seed_bps = 0                     # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
 pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
 pattern_synthetic = 0                    # generated reference patterns used when no pattern store is set
+custom_bots = 0                          # AI-designed custom bot blueprints per generation (0 = off)
+custom_generations = 2                   # custom builder generations (design, compile, score, retrain)
 
 # MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz, AI agent factory.
 [modes.max]
@@ -135,3 +139,5 @@ agent_heat_slots = 16                    # blocks each AI arena heat simulates
 pattern_seed_bps = 5000                  # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
 pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
 pattern_synthetic = 3072                 # generated reference patterns used when no pattern store is set
+custom_bots = 128                        # AI-designed custom bot blueprints per generation (0 = off)
+custom_generations = 4                   # custom builder generations (design, compile, score, retrain)

@@ -33,6 +33,8 @@ code that is a model or an experiment. The table says which is which.
 | Attack vectors: multi-victim sandwich, JIT liquidity, back-run arbitrage | `attack_vectors` | **exact** token amounts | every leg runs on the AMM math above; v3 mint rounds up and burn rounds down as in `_modifyPosition`; JIT fees are split at the position's ticks and checked against the single-swap result on every swap |
 | Attack vectors: liquidation back-run, oracle manipulation | `attack_vectors` | **model** | Aave-style lending market (LTV, threshold, close factor, bonus), spot or per-block TWAP oracle; swap legs are exact |
 | Strategy discovery | `strategy_discovery` | **experimental** search, **exact** replay | MAP-Elites search over action sequences; every saved strategy replays to the same wei |
+| Custom bot builder: compiler, VM, swap / victim / mint / burn / cycle legs | `custom_builder` | **exact** token amounts | legs run on `AttackState`; a compiled sandwich equals the hand-written one to the wei (`tests/test_custom_builder.py`) |
+| Custom bot builder: opcode traces, `bridge` legs, AI blueprint synthesis | `custom_builder` | **model** / **experimental** | opcode traces are a fixed pattern per pool version, not an EVM trace; the remote chain is another seeded scenario |
 
 ### How the v3 math is verified
 
@@ -72,7 +74,8 @@ Three details make the port bit-exact rather than "close":
   model (builders, bundles, relays, proposer, EIP-1559 base fee), the private
   relay model, the router and the RL agent.
 * **MAX Brutal Simulation** (`--mode max`): the same with every core and the
-  experimental modules (policy-path fuzzer, AI agent factory) turned up.
+  experimental modules (policy-path fuzzer, AI agent factory, custom bot
+  builder) turned up.
 
 Rules applied in block execution:
 
@@ -143,6 +146,46 @@ sandwiches that front-run on one victim's pool and back-run on another, and
 lending market reads a spot price; the same scenario with a TWAP oracle does
 not pay. Hold-out results show how often a structure also pays on other seeds.
 
+## Custom bot builder
+
+`custom_builder` turns a JSON *blueprint* into a runnable competitor bot. A
+blueprint has four parts:
+
+* `trigger`: a nested tree (`all`, `any`, `not`) over victim metrics (priority
+  fee, gas limit, size in ppm of the reserve, slippage tolerance, price impact,
+  ticks crossed, cross-venue spread, loan health after the victim, ...),
+  counts or ordered sequences in a modelled opcode trace, and event listeners
+  (`Swap`, `LargeSwap`, `PriceDeviation`, `LoanAtRisk`, `TickCross`);
+* `script`: nested actions (`frontrun`, `victim`, `victims`, `backrun`, `swap`,
+  `close`, `mint`, `burn`, `liquidate`, `arb`, `tstore` / `tswap` transient
+  storage, `if`, `repeat`, `atomic` with rollback or abort, and `bridge`, a
+  delayed leg on a second seeded "chain");
+* `tracing`: opcode conditions, contiguous matching, trace recording;
+* `pipeline`: revert policy, settlement, gas and capital caps, the optimiser
+  budget. Every key can be overridden per run without recompiling.
+
+The compiler validates the blueprint (every problem is reported with its
+path, e.g. `$.script[2].size.ppm`), assembles it into bytecode for a small
+stack / jump machine whose jumps only go forward (so every bot terminates),
+and creates one Python class per blueprint, cached by digest and safe to share
+between threads. One `{"optimize": [lo, hi]}` size per blueprint is searched
+per victim with the same grid + ternary search the attack catalog uses.
+
+```bash
+PYTHONPATH=src python -m simulator --bot-templates
+PYTHONPATH=src python -m simulator --bot-template composite_bridge_bundle --seed 3
+PYTHONPATH=src python -m simulator --build-bot my_bot.json --scenario-victims 10
+PYTHONPATH=src python -m simulator --blueprint-schema
+```
+
+In MAX mode (`custom_bots`, `custom_generations` in `sandwich.toml`) the AI
+agent factory's NumPy generator, conditioned on the RL results, designs whole
+blueprints, trigger structure included. They are compiled and scored on
+seeded scenarios in fixed batches on the full-core worker pool, the generator
+retrains on the best ones, and every trigger structure that no built-in
+template uses is listed under `custom_builder.novel_trigger_classes`. "Novel"
+means new to this design space, not a claim about real searchers.
+
 ## What it does not do
 
 * No live data: no RPC, no mempool subscription, no real blocks, no
@@ -210,10 +253,12 @@ src/simulator/
   config.py, config_sync.py, settings_gui.py, parallel.py, dataflow.py, controller.py
   attack_vectors.py     JIT, multi-victim, back-run arbitrage, liquidation, oracle attacks
   strategy_discovery.py local search for new attack compositions, strategy library      [experimental]
+  custom_builder.py     blueprint schema, compiler, bytecode VM, AI blueprint synthesis   [exact legs, model traces]
   reinforcement_engine.py, path_fuzzer.py, ai_agent_factory.py, pattern_ingestor.py   [experimental]
 tests/
   test_reference_vectors.py   Uniswap v2/v3 official vectors (335 test cases)
   test_protocol_rules.py      EIP-1559, nonces, out-of-gas, funding, replacement, v4 fees
+  test_custom_builder.py      blueprint schema, VM semantics, exactness, thread contention
   vectors/                    converted v3-core swap snapshot
 tools/convert_v3_swap_snapshot.py
 ```

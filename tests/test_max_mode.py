@@ -54,7 +54,8 @@ def max_cfg(**kw):
     base = dict(blocks=1, txs_per_block=8, frontrun_grid=8, refine_iterations=4, fuzz_iterations=32,
                 layout_fuzz_iterations=16, rl_rounds=1, rl_steps_per_shard=6, rl_eval_steps=8, pg_paths=48,
                 pg_path_steps=4, pg_batch=8, shard_density=2, parallel_threshold=1, agent_bots=12,
-                agent_generations=2, agent_heat_size=4, agent_heat_slots=2, pattern_synthetic=96, pattern_limit=64)
+                agent_generations=2, agent_heat_size=4, agent_heat_slots=2, pattern_synthetic=96, pattern_limit=64,
+                custom_bots=8, custom_generations=1)
     base.update(kw)
     return SimulationConfig.for_mode("max", **base)
 

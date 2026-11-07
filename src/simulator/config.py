@@ -48,6 +48,12 @@ patterns pre-train the generator, and ``pattern_seed_bps`` of generation 0
 starts from them. Without a store, ``pattern_synthetic`` generated reference
 patterns (clearly marked ``source = "synthetic"``) are used instead.
 
+Layer 14 (``custom_builder``) runs when ``custom_bots > 0``: the AI factory's
+generator designs ``custom_bots`` complete bot blueprints per generation
+(trigger trees, action scripts, execution pipelines), the custom builder
+compiles them into runtime classes and scores them on seeded scenarios on the
+worker pool, for ``custom_generations`` generations.
+
 Layer 10 (:mod:`simulator.validator`) audits the configuration, the pools and
 the simulator's own source before any simulation loop starts; the ``audit_*``
 fields control it. Settings can also come from a ``sandwich.toml`` file
@@ -95,6 +101,8 @@ MAX_PATTERN_LIMIT = 10_000_000
 MAX_PATTERN_SYNTHETIC = 1_000_000
 MAX_PATTERN_STORAGE_GB = 1_000_000
 MAX_AGENT_GENERATIONS = 1_000
+MAX_CUSTOM_BOTS = 100_000
+MAX_CUSTOM_GENERATIONS = 1_000
 AUDIT_LEVELS = ("error", "warning", "info")
 RL_REGIMES = ("calm", "volatile", "extreme")
 START_METHODS = ("spawn", "fork", "forkserver")
@@ -370,6 +378,9 @@ class SimulationConfig:
     pattern_seed_bps: int = 0  # share of generation-0 AI bots seeded from stored patterns
     pattern_limit: int = 4_096  # heaviest patterns loaded into the factory
     pattern_synthetic: int = 0  # generated reference patterns used when no store is configured
+    # Layer 14: custom bot builder (0 bots = off).
+    custom_bots: int = 0  # AI-designed custom bot blueprints per generation
+    custom_generations: int = 2  # design -> compile -> score -> retrain rounds
     # Layer 10: pre-flight integrity audit and trace output.
     audit: bool = True  # run simulator.validator before any simulation loop
     audit_fail_on: str = "error"  # lowest finding severity that blocks a run: error | warning | info
@@ -435,6 +446,10 @@ class SimulationConfig:
             raise ConfigError(f"pattern_limit must be within [0, {MAX_PATTERN_LIMIT}]")
         if not 0 <= self.pattern_synthetic <= MAX_PATTERN_SYNTHETIC:
             raise ConfigError(f"pattern_synthetic must be within [0, {MAX_PATTERN_SYNTHETIC}]")
+        if not 0 <= self.custom_bots <= MAX_CUSTOM_BOTS:
+            raise ConfigError(f"custom_bots must be within [0, {MAX_CUSTOM_BOTS}]")
+        if not 1 <= self.custom_generations <= MAX_CUSTOM_GENERATIONS:
+            raise ConfigError(f"custom_generations must be within [1, {MAX_CUSTOM_GENERATIONS}]")
         if self.audit_fail_on not in AUDIT_LEVELS:
             raise ConfigError(f"audit_fail_on must be one of {', '.join(AUDIT_LEVELS)}")
         if not 0 <= self.audit_tick_samples <= 100_000:
@@ -513,6 +528,8 @@ class SimulationConfig:
             "pattern_seed_bps": self.pattern_seed_bps,
             "pattern_limit": self.pattern_limit,
             "pattern_synthetic": self.pattern_synthetic,
+            "custom_bots": self.custom_bots,
+            "custom_generations": self.custom_generations,
             "audit": self.audit,
             "audit_fail_on": self.audit_fail_on,
             "audit_code_scan": self.audit_code_scan,
@@ -550,6 +567,8 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         pattern_seed_bps=0,
         pattern_limit=4_096,
         pattern_synthetic=0,
+        custom_bots=0,
+        custom_generations=2,
     ),
     RunMode.BRUTAL_AGGRESSIVE: dict(
         blocks=6,
@@ -575,6 +594,8 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         pattern_seed_bps=0,
         pattern_limit=4_096,
         pattern_synthetic=0,
+        custom_bots=0,
+        custom_generations=2,
     ),
     RunMode.MAX_BRUTAL: dict(
         blocks=8,
@@ -600,6 +621,8 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         pattern_seed_bps=5_000,
         pattern_limit=4_096,
         pattern_synthetic=3_072,
+        custom_bots=128,
+        custom_generations=4,
     ),
 }
 
@@ -614,6 +637,8 @@ __all__ = [
     "FULL_CPU_FRACTION",
     "MAX_AGENT_BOTS",
     "MAX_AGENT_GENERATIONS",
+    "MAX_CUSTOM_BOTS",
+    "MAX_CUSTOM_GENERATIONS",
     "MAX_PATTERN_LIMIT",
     "MAX_PATTERN_STORAGE_GB",
     "MAX_PATTERN_SYNTHETIC",

@@ -77,6 +77,8 @@ from .config import (
     AUDIT_LEVELS,
     MAX_AGENT_BOTS,
     MAX_AGENT_GENERATIONS,
+    MAX_CUSTOM_BOTS,
+    MAX_CUSTOM_GENERATIONS,
     MAX_SHARD_DENSITY,
     RL_REGIMES,
     ConfigError,
@@ -222,6 +224,8 @@ R_PG = _rule("signal.pg_paths", E, "path fuzzer sizes must be valid")
 R_PG_IDLE = _rule("signal.pg_paths_ignored", I, "pg_paths is set but the mode does not run the path fuzzer")
 R_AGENTS = _rule("signal.agent_factory", E, "AI agent factory sizes must be valid")
 R_AGENTS_IDLE = _rule("signal.agent_factory_ignored", I, "agent_bots is set but the mode does not run the factory")
+R_CUSTOM = _rule("signal.custom_builder", E, "custom bot builder sizes must be valid")
+R_CUSTOM_IDLE = _rule("signal.custom_builder_ignored", I, "custom_bots is set but the mode does not run the builder")
 R_PATTERNS = _rule("signal.pattern_store", E, "MEV pattern settings must be valid and the store must exist")
 R_PATTERNS_IDLE = _rule("signal.pattern_seed_ignored", I, "pattern_seed_bps is set but no AI factory runs")
 R_REGIME = _rule("signal.rl_regime", E, "rl_regime must be calm, volatile or extreme")
@@ -789,6 +793,7 @@ def check_signals(cfg: Any, col: Collector, cpus: Optional[int] = None) -> None:
     _check_parallel_signals(cfg, col, cpus)
     _check_path_signals(cfg, col)
     _check_agent_signals(cfg, col)
+    _check_custom_signals(cfg, col)
     _check_pattern_signals(cfg, col)
     regime = getattr(cfg, "rl_regime", None)
     if col.check(R_REGIME, regime in RL_REGIMES, "rl_regime", f"rl_regime={regime!r}"):
@@ -853,6 +858,17 @@ def _check_agent_signals(cfg: Any, col: Collector) -> None:
     mode = getattr(cfg, "mode", None)
     if ok and bots and isinstance(mode, RunMode):
         col.check(R_AGENTS_IDLE, mode.aggressive, "agent_bots", f"{mode.label} does not run the AI agent factory")
+
+
+def _check_custom_signals(cfg: Any, col: Collector) -> None:
+    bots, gens = (getattr(cfg, n, None) for n in ("custom_bots", "custom_generations"))
+    if bots is None and gens is None:
+        return
+    ok = _int_in(bots, 0, MAX_CUSTOM_BOTS) and _int_in(gens, 1, MAX_CUSTOM_GENERATIONS)
+    col.check(R_CUSTOM, ok, "custom_bots", f"custom_bots={bots!r} custom_generations={gens!r}")
+    mode = getattr(cfg, "mode", None)
+    if ok and bots and isinstance(mode, RunMode):
+        col.check(R_CUSTOM_IDLE, mode.aggressive, "custom_bots", f"{mode.label} does not run the custom bot builder")
 
 
 def _check_pattern_signals(cfg: Any, col: Collector) -> None:
@@ -972,7 +988,8 @@ def _workload_note(cfg: Any, col: Collector) -> None:
             note = (f"{mode.label}: {cfg.blocks} blocks x {cfg.txs_per_block} txs, grid {cfg.frontrun_grid}, "
                     f"{cfg.fuzz_iterations} fuzz swaps, {cfg.layout_fuzz_iterations} layouts/slot, "
                     f"{rl} RL steps, {pg} policy-gradient path steps, {cfg.agent_bots} AI bots x "
-                    f"{cfg.agent_generations} generations ({heats} arena heats) on {cfg.workers} worker(s)")
+                    f"{cfg.agent_generations} generations ({heats} arena heats), {cfg.custom_bots} custom "
+                    f"blueprints x {cfg.custom_generations} generations on {cfg.workers} worker(s)")
         else:
             note = f"{mode.label}: {cfg.txs_per_block} txs quoted, {cfg.fuzz_iterations} fuzz swaps"
     except (AttributeError, TypeError):

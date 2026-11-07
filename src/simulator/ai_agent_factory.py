@@ -2146,6 +2146,29 @@ class AgentFactory:
             return heats, [_heat_task(t) for t in tasks]
         return heats, executor.map(_heat_task, tasks)
 
+    def synthesize_custom_bots(self, bots: int, generations: int, executor: Optional[WorkerPool] = None,
+                               victims: int = 8, scenario_seeds: int = 2, batch: int = 4,
+                               epochs: Optional[int] = None) -> Dict[str, Any]:
+        """Layer 14: let a NumPy generator conditioned on this factory's RL features design custom bots.
+
+        A :class:`simulator.custom_builder.BlueprintSynthesizer` maps
+        ``[RL features, latent]`` to blueprint genes, so trigger trees,
+        action scripts and execution pipelines are synthesised by a network,
+        compiled to runtime classes and scored on seeded scenarios in fixed
+        batches on ``executor``; it retrains on its elite every generation and
+        reports every trigger structure it produced that no built-in template
+        has. Returns the synthesis summary.
+        """
+        from .custom_builder import BlueprintSynthesizer  # Layer 14 compiler; imported when used
+
+        synth = BlueprintSynthesizer(
+            bots=bots, generations=generations, seed=self.seed, features=self.metrics.vector(),
+            latent_dim=max(1, self.latent_dim), victims=victims, scenario_seeds=scenario_seeds, batch=batch,
+            epochs=self.epochs if epochs is None else epochs)
+        summary = synth.run(executor=executor).summary()
+        summary["conditioned_on"] = {"regime": self.metrics.regime, "features": list(FEATURE_NAMES)}
+        return summary
+
     def run(self, executor: Optional[WorkerPool] = None, workers: Optional[int] = None) -> FactoryReport:
         """Synthesise -> deploy -> rank -> train -> adapt, for every generation."""
         own = executor is None and workers is not None

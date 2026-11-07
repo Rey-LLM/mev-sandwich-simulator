@@ -40,6 +40,14 @@ Attack catalog and strategy discovery (Layer 13):
 ``--strategies``          list the local strategy library (``--strategy-dir``)
 ``--verify-strategies``   replay every stored strategy and check its profit to the wei
 
+Custom bot builder (Layer 14):
+
+``--build-bot FILE``      compile a JSON blueprint and run it on a seeded scenario
+                          (``--scenario-victims``); prints the run, the best plan and
+                          the disassembled bytecode
+``--bot-template NAME``   the same for a built-in template (``--bot-templates`` lists them)
+``--blueprint-schema``    print the blueprint schema (metrics, events, opcodes, actions)
+
 Exit codes: 0 success; 1 an invariant failed during the run; 2 invalid
 settings, a settings file that cannot be read or written safely, or a
 blocking integrity-audit finding.
@@ -123,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--strategies", action="store_true", help="list the local strategy library")
     actions.add_argument("--verify-strategies", action="store_true",
                          help="replay every stored strategy and check its profit to the wei")
+    actions.add_argument("--build-bot", metavar="FILE",
+                         help="compile a custom bot blueprint (JSON) and run it on a seeded scenario")
+    actions.add_argument("--bot-template", metavar="NAME", help="compile and run a built-in blueprint template")
+    actions.add_argument("--bot-templates", action="store_true", help="list the built-in blueprint templates")
+    actions.add_argument("--blueprint-schema", action="store_true", help="print the custom bot blueprint schema")
     disc = parser.add_argument_group("Attack catalog and strategy discovery")
     disc.add_argument("--scenario-victims", type=int, default=10, metavar="N",
                       help="pending victim swaps per generated scenario (default 10)")
@@ -255,6 +268,9 @@ def _main(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     if args.attack_catalog or args.discover or args.strategies or args.verify_strategies:
         return _strategy_action(args, cfg, out)
 
+    if args.build_bot or args.bot_template or args.bot_templates or args.blueprint_schema:
+        return _builder_action(args, cfg, out)
+
     controller = SimulationController(cfg)
     try:
         report = controller.run()
@@ -321,6 +337,34 @@ def _strategy_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextI
     with WorkerPool.for_config(cfg) as wp:
         report = engine.run(executor=wp, library=None if args.no_save else library)
     _dump(report.to_dict(), out)
+    return EXIT_OK
+
+
+def _builder_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO) -> int:
+    from .custom_builder import BLUEPRINT_SCHEMA, TEMPLATES, normalize_blueprint, scenario_for, spawn_custom_bot, \
+        template
+
+    if args.blueprint_schema:
+        _dump(BLUEPRINT_SCHEMA, out)
+        return EXIT_OK
+    if args.bot_templates:
+        _dump({name: t.get("description", "") for name, t in TEMPLATES.items()}, out)
+        return EXIT_OK
+    if args.scenario_victims < 1:
+        raise ConfigError("--scenario-victims must be >= 1")
+    if args.build_bot:
+        try:
+            with open(args.build_bot, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"cannot read blueprint {args.build_bot!r}: {exc}") from exc
+    else:
+        raw = template(args.bot_template)
+    bot = spawn_custom_bot(raw)
+    run = bot.run(scenario_for(cfg.seed, args.scenario_victims))
+    best = run.best
+    _dump({"blueprint": normalize_blueprint(raw), "class": type(bot).__name__, "run": run.summary(),
+           "best_plan": best.to_dict() if best is not None else None, "bytecode": bot.disassemble()}, out)
     return EXIT_OK
 
 

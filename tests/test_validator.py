@@ -247,6 +247,9 @@ TRIGGERS = {
     "signal.agent_factory": lambda mp, tmp: signals(corrupt(brutal(), agent_heat_size=0)),
     "signal.agent_factory_ignored": lambda mp, tmp: signals(
         SimulationConfig.for_mode("moderate", cpus=4, agent_bots=8)),
+    "signal.custom_builder": lambda mp, tmp: signals(corrupt(brutal(), custom_generations=0)),
+    "signal.custom_builder_ignored": lambda mp, tmp: signals(
+        SimulationConfig.for_mode("moderate", cpus=4, custom_bots=8)),
     "signal.pattern_store": lambda mp, tmp: signals(
         SimulationConfig.for_mode("max", cpus=4, pattern_store=str(tmp / "missing-store"))),
     "signal.pattern_seed_ignored": lambda mp, tmp: signals(
