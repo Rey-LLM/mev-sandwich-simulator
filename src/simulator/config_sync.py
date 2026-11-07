@@ -1,4 +1,4 @@
-"""Layers 09 / 10: ``sandwich.toml`` settings sync engine.
+"""Layers 09 / 10 / 11: ``sandwich.toml`` settings sync engine.
 
 The central settings file
 -------------------------
@@ -80,6 +80,8 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from .config import (
     AUDIT_LEVELS,
+    MAX_AGENT_BOTS,
+    MAX_AGENT_GENERATIONS,
     MAX_PG_PATHS,
     MAX_SHARD_DENSITY,
     MODE_KEYS,
@@ -359,6 +361,14 @@ SETTINGS: Tuple[Setting, ...] = (
        minimum=0, maximum=MAX_PG_PATHS),
     _s("pg_path_steps", "modes", "pg_path_steps", int, ["--pg-steps"], "steps per policy-gradient path", minimum=1),
     _s("pg_batch", "modes", "pg_batch", int, ["--pg-batch"], "paths per worker task", minimum=1),
+    _s("agent_bots", "modes", "agent_bots", int, ["--agent-bots"],
+       "AI-generated competitor bots per generation (0 = off)", minimum=0, maximum=MAX_AGENT_BOTS),
+    _s("agent_generations", "modes", "agent_generations", int, ["--agent-generations"],
+       "AI factory generations (synthesise, deploy, retrain)", minimum=1, maximum=MAX_AGENT_GENERATIONS),
+    _s("agent_heat_size", "modes", "agent_heat_size", int, ["--agent-heat-size"],
+       "AI bots per arena heat (one worker task)", minimum=1),
+    _s("agent_heat_slots", "modes", "agent_heat_slots", int, ["--agent-heat-slots"],
+       "blocks each AI arena heat simulates", minimum=1),
 )
 
 COMMON_TABLES: Tuple[str, ...] = ("run", "parallel", "gas", "search", "pbs", "private_relay", "rl", "trace", "audit")
@@ -844,7 +854,8 @@ HEADER = (
 MODE_NOTES = {
     "moderate": "Moderate Scan: read-only telemetry, gas-limit audit, passive dataflow (50-60% of CPUs).",
     "brutal": "Brutal Aggressive Simulation: multi-block sandwich search on the capped pool (50-60% of CPUs).",
-    "max": "MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz.",
+    "max": "MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz, "
+           "AI agent factory.",
 }
 
 

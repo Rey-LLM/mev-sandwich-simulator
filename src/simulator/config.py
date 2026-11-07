@@ -1,4 +1,4 @@
-"""Layers 03 / 09 / 10: run modes, simulation presets and the CPU worker policy.
+"""Layers 03 / 09 / 10 / 11: run modes, simulation presets and the CPU worker policy.
 
 Three hardcoded execution modes (run matrices) drive the simulator:
 
@@ -17,7 +17,9 @@ Three hardcoded execution modes (run matrices) drive the simulator:
   CPUs this process may run on, every fixed shard / chunk count is multiplied
   by ``shard_density`` (so machines with many cores have enough independent
   tasks to stay busy), and thousands of policy-gradient paths are fuzzed
-  concurrently (Layer 09, :mod:`simulator.path_fuzzer`).
+  concurrently (Layer 09, :mod:`simulator.path_fuzzer`), and the embedded AI
+  agent factory deploys hundreds of machine-generated competitor bots per
+  generation across every core (Layer 11, :mod:`simulator.ai_agent_factory`).
 
 Brutal and MAX modes also run the Layer 04 PBS simulation (``block_builder``):
 per slot, competing builders (vanilla, greedy, and a layout fuzzer on the
@@ -31,6 +33,12 @@ worker pool. Layer 06 (``multi_hop_router``) scans every arbitrage cycle up to
 ``router_max_hops`` hops in every mode. Layer 08 (``reinforcement_engine``)
 trains an online bidding agent against competing searcher bots for
 ``rl_rounds`` rounds of parallel policy iteration.
+
+Layer 11 (``ai_agent_factory``) runs when ``agent_bots > 0``: a NumPy neural
+generator conditioned on the RL results synthesises ``agent_bots`` competitor
+bot profiles per generation, deploys them in heats of ``agent_heat_size`` bots
+for ``agent_heat_slots`` blocks on the worker pool, and retrains itself on the
+winners for ``agent_generations`` generations.
 
 Layer 10 (:mod:`simulator.validator`) audits the configuration, the pools and
 the simulator's own source before any simulation loop starts; the ``audit_*``
@@ -74,6 +82,8 @@ FULL_CPU_FRACTION = 1.0
 WORKERS_ENV_VAR = "MEV_SIM_WORKERS"
 MAX_SHARD_DENSITY = 64
 MAX_PG_PATHS = 1_000_000
+MAX_AGENT_BOTS = 100_000
+MAX_AGENT_GENERATIONS = 1_000
 AUDIT_LEVELS = ("error", "warning", "info")
 RL_REGIMES = ("calm", "volatile", "extreme")
 START_METHODS = ("spawn", "fork", "forkserver")
@@ -336,6 +346,11 @@ class SimulationConfig:
     pg_paths: int = 0  # policy-gradient paths fuzzed concurrently (0 = off)
     pg_path_steps: int = 16  # environment steps per path
     pg_batch: int = 32  # paths per worker task (fixed, so results never depend on the worker count)
+    # Layer 11: embedded AI agent factory (0 bots = off).
+    agent_bots: int = 0  # machine-generated competitor bots per generation
+    agent_generations: int = 2  # synthesise -> deploy -> retrain rounds
+    agent_heat_size: int = 8  # bots per arena heat (one worker task; fixed, so results never depend on workers)
+    agent_heat_slots: int = 12  # blocks each heat simulates
     # Layer 10: pre-flight integrity audit and trace output.
     audit: bool = True  # run simulator.validator before any simulation loop
     audit_fail_on: str = "error"  # lowest finding severity that blocks a run: error | warning | info
@@ -383,6 +398,12 @@ class SimulationConfig:
             raise ConfigError(f"pg_paths must be within [0, {MAX_PG_PATHS}]")
         if self.pg_path_steps < 1 or self.pg_batch < 1:
             raise ConfigError("pg_path_steps and pg_batch must be >= 1")
+        if not 0 <= self.agent_bots <= MAX_AGENT_BOTS:
+            raise ConfigError(f"agent_bots must be within [0, {MAX_AGENT_BOTS}]")
+        if not 1 <= self.agent_generations <= MAX_AGENT_GENERATIONS:
+            raise ConfigError(f"agent_generations must be within [1, {MAX_AGENT_GENERATIONS}]")
+        if self.agent_heat_size < 1 or self.agent_heat_slots < 1:
+            raise ConfigError("agent_heat_size and agent_heat_slots must be >= 1")
         if self.audit_fail_on not in AUDIT_LEVELS:
             raise ConfigError(f"audit_fail_on must be one of {', '.join(AUDIT_LEVELS)}")
         if not 0 <= self.audit_tick_samples <= 100_000:
@@ -450,6 +471,10 @@ class SimulationConfig:
             "pg_paths": self.pg_paths,
             "pg_path_steps": self.pg_path_steps,
             "pg_batch": self.pg_batch,
+            "agent_bots": self.agent_bots,
+            "agent_generations": self.agent_generations,
+            "agent_heat_size": self.agent_heat_size,
+            "agent_heat_slots": self.agent_heat_slots,
             "audit": self.audit,
             "audit_fail_on": self.audit_fail_on,
             "audit_code_scan": self.audit_code_scan,
@@ -480,6 +505,10 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         pg_paths=0,
         pg_path_steps=16,
         pg_batch=32,
+        agent_bots=0,
+        agent_generations=2,
+        agent_heat_size=8,
+        agent_heat_slots=12,
     ),
     RunMode.BRUTAL_AGGRESSIVE: dict(
         blocks=6,
@@ -498,6 +527,10 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         pg_paths=0,
         pg_path_steps=16,
         pg_batch=32,
+        agent_bots=0,
+        agent_generations=2,
+        agent_heat_size=8,
+        agent_heat_slots=12,
     ),
     RunMode.MAX_BRUTAL: dict(
         blocks=8,
@@ -516,6 +549,10 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         pg_paths=4_096,
         pg_path_steps=16,
         pg_batch=32,
+        agent_bots=512,
+        agent_generations=6,
+        agent_heat_size=8,
+        agent_heat_slots=16,
     ),
 }
 
@@ -528,6 +565,8 @@ __all__ = [
     "CPU_FLOOR_FRACTION",
     "CPU_CEILING_FRACTION",
     "FULL_CPU_FRACTION",
+    "MAX_AGENT_BOTS",
+    "MAX_AGENT_GENERATIONS",
     "MAX_PG_PATHS",
     "MAX_SHARD_DENSITY",
     "MODE_KEYS",

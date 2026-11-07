@@ -1,4 +1,4 @@
-"""Layers 03-10: simulation controller.
+"""Layers 03-11: simulation controller.
 
 ``SimulationController`` is the single entry point that dispatches a run to
 the mode chosen in :class:`SimulationConfig`, owns the worker pool for the
@@ -22,7 +22,13 @@ Run matrices:
   logical CPU, every fixed shard count multiplied by ``shard_density``, and a
   ``policy_paths`` section from
   :class:`simulator.path_fuzzer.PolicyPathFuzzer` (``pg_paths`` concurrent
-  policy-gradient paths).
+  policy-gradient paths) and, when ``agent_bots > 0``, an ``agent_factory``
+  section from :class:`simulator.ai_agent_factory.AgentFactory` (Layer 11):
+  the factory ingests the RL report, its trained table (which becomes the
+  incumbent policy) and the policy-path summary, then deploys
+  ``agent_bots`` machine-generated competitor bots per generation on the
+  same full-core worker pool. The factory needs NumPy and is imported only
+  when it runs, so the other modes stay standard-library only.
 
 Every report carries ``audit`` (the pre-flight result) and ``resources``
 (worker-pool telemetry: processes, tasks, CPU seconds and utilization).
@@ -113,6 +119,7 @@ def invariants_ok(report: Mapping[str, Any]) -> bool:
         and result.get("pbs", {}).get("invariants_ok", True)
         and result.get("private_relay", {}).get("invariants_ok", True)
         and result.get("policy_paths", {}).get("invariants", {}).get("ok", True)
+        and result.get("agent_factory", {}).get("invariants", {}).get("ok", True)
     )
 
 
@@ -149,15 +156,19 @@ class SimulationController:
                 body["pbs"] = PBSSimulation(pools, cfg).run(executor=wp).summary()
                 if cfg.private_flow_bps > 0:
                     body["private_relay"] = PrivateOrderflowSimulation(pools, cfg).run(executor=wp).summary()
+                rl: Optional[ReinforcementSimulation] = None
                 if cfg.rl_rounds > 0:
-                    body["reinforcement"] = ReinforcementSimulation(
+                    rl = ReinforcementSimulation(
                         seed=cfg.seed, rounds=cfg.rl_rounds, steps_per_shard=cfg.rl_steps_per_shard,
                         eval_steps=cfg.rl_eval_steps, regime=cfg.rl_regime, shards=cfg.shards(RL_SHARDS),
-                    ).run(executor=wp)
+                    )
+                    body["reinforcement"] = rl.run(executor=wp)
                 if cfg.pg_paths > 0:
                     body["policy_paths"] = PolicyPathFuzzer(
                         paths=cfg.pg_paths, steps=cfg.pg_path_steps, batch=cfg.pg_batch, seed=cfg.seed,
                     ).run(executor=wp).summary()
+                if cfg.agent_bots > 0:
+                    body["agent_factory"] = run_agent_factory(cfg, wp, body, rl)
             router = MultiHopRouter(pools, cfg.native_token, cfg.router_max_hops)
             body["router"] = router.scan_cycles(executor=wp, gas_price_wei=cfg.gas_price_wei,
                                                 chunks=cfg.shards(ROUTER_CHUNKS)).summary()
@@ -174,9 +185,21 @@ class SimulationController:
         }
 
 
+def run_agent_factory(cfg: SimulationConfig, executor: Optional[WorkerPool], body: Mapping[str, Any],
+                      rl: Optional[ReinforcementSimulation] = None) -> Dict[str, Any]:
+    """Layer 11: feed the RL results into the AI agent factory and deploy its bots on ``executor``."""
+    from .ai_agent_factory import AgentFactory  # NumPy is only needed when the factory runs
+
+    factory = AgentFactory.for_config(cfg)
+    table = rl.last_train.table if rl is not None and rl.last_train is not None else None
+    factory.ingest(reinforcement=body.get("reinforcement"), table=table, policy_paths=body.get("policy_paths"))
+    return factory.run(executor=executor).summary()
+
+
 def run(mode: Any = RunMode.MODERATE_SCAN, **overrides: Any) -> Dict[str, Any]:
     workers = overrides.pop("workers", None)
     return SimulationController(SimulationConfig.for_mode(mode, workers=workers, **overrides)).run()
 
 
-__all__ = ["TRACE_LOGGER", "SimulationController", "demo_market", "invariants_ok", "run", "trace_logging"]
+__all__ = ["TRACE_LOGGER", "SimulationController", "demo_market", "invariants_ok", "run", "run_agent_factory",
+           "trace_logging"]

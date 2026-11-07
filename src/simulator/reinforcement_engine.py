@@ -670,11 +670,13 @@ class StepResult:
 class SandwichEnvironment:
     """One victim per step, competing bots, a greedy builder and exact wei rewards."""
 
-    def __init__(self, config: Optional[EnvConfig] = None) -> None:
+    def __init__(self, config: Optional[EnvConfig] = None, bots: Optional[Sequence[Any]] = None) -> None:
+        """``bots`` overrides ``config.competitors`` with ready-made bot objects (anything with
+        ``name``, ``build``, ``sample_delay`` and ``observe``, e.g. Layer 11 synthesized bots)."""
         self.config = config or EnvConfig()
         self.regime = REGIMES[self.config.regime]
         self.rng = random.Random(_seed_int("env", self.config.seed))
-        self.bots = self.config.bots()
+        self.bots = list(bots) if bots is not None else self.config.bots()
         self.total_steps = 0
         self.episode = 0
         self._reset_market()
@@ -1131,10 +1133,12 @@ class ReinforcementSimulation:
         self.eval_steps = eval_steps
         self.kind = kind
         self.shards = shards
+        self.last_train: Optional[ParallelTrainingReport] = None  # trained table of the last run (Layer 11 input)
 
     def run(self, executor: Optional[WorkerPool] = None) -> Dict[str, Any]:
         train = parallel_policy_iteration(self.env_config, self.rounds, self.steps_per_shard, shards=self.shards,
                                           kind=self.kind, seed=self.seed, executor=executor)
+        self.last_train = train
         agent = train.agent(self.seed)
         ev = run_agent(agent, SandwichEnvironment(_with_seed(self.env_config, _seed_int(self.seed, "eval"))),
                        self.eval_steps, learn=False)

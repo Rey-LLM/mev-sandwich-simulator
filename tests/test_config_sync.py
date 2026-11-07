@@ -120,7 +120,8 @@ SAMPLES = {
     "fuzz_iterations": ("17", 17), "layout_fuzz_iterations": ("9", 9), "private_flow_bps": ("1234", 1_234),
     "router_max_hops": ("2", 2), "rl_rounds": ("2", 2), "rl_steps_per_shard": ("7", 7),
     "rl_eval_steps": ("11", 11), "shard_density": ("3", 3), "pg_paths": ("13", 13), "pg_path_steps": ("5", 5),
-    "pg_batch": ("4", 4),
+    "pg_batch": ("4", 4), "agent_bots": ("24", 24), "agent_generations": ("3", 3), "agent_heat_size": ("6", 6),
+    "agent_heat_slots": ("5", 5),
 }
 
 

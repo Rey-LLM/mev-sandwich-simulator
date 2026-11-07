@@ -244,6 +244,9 @@ TRIGGERS = {
     "signal.parallel_headroom": lambda mp, tmp: signals(SimulationConfig.for_mode("brutal", cpus=64), cpus=64),
     "signal.pg_paths": lambda mp, tmp: signals(corrupt(brutal(), pg_batch=0)),
     "signal.pg_paths_ignored": lambda mp, tmp: signals(SimulationConfig.for_mode("moderate", cpus=4, pg_paths=8)),
+    "signal.agent_factory": lambda mp, tmp: signals(corrupt(brutal(), agent_heat_size=0)),
+    "signal.agent_factory_ignored": lambda mp, tmp: signals(
+        SimulationConfig.for_mode("moderate", cpus=4, agent_bots=8)),
     "signal.rl_regime": lambda mp, tmp: signals(corrupt(brutal(), rl_regime="chaos")),
     "signal.rl_bins": lambda mp, tmp: _rl_plain(bins=_bins(reserve_bps=(5, 1))),
     "signal.rl_bin_coverage": lambda mp, tmp: _rl_plain(regime="calm", bins=_bins(victim_bps=(10**9,))),

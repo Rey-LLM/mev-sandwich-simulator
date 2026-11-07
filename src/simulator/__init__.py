@@ -32,6 +32,15 @@ blocking finding), ``config_sync`` (the central ``sandwich.toml``: one
 schema for the file, the CLI flags and the GUI form; format-preserving,
 locked, conflict-checked atomic writes) and ``settings_gui`` (browser
 settings editor, ``python -m simulator --gui``).
+Layer 11: ``ai_agent_factory`` (local embedded AI agent factory: a NumPy
+neural matrix engine with manual backprop and AdamW, conditioned on the
+Layer 08/09 RL results, synthesises competitor bot profiles - priority-fee
+ranges, slippage thresholds, multi-hop path choices, target pools and bundle
+layout - spins up a Python class per bot at runtime, deploys hundreds of
+them per generation in parallel arena heats against the RL incumbent through
+one block-building queue, and retrains on the winners with adaptive
+mutation and exact capital / offspring allocation). It is the only module
+that needs NumPy.
 """
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"

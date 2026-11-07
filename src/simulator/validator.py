@@ -31,7 +31,7 @@ rule families are checked:
     uint256 with a block limit in ``[21000, 30M]`` (and room for a sandwich),
     counts non-negative, the CPU policy and worker count against this
     machine, the multiprocessing start method available on this platform,
-    shard density and path-fuzzer sizes, the RL regime, state-bin edges and
+    shard density, path-fuzzer and AI agent factory sizes, the RL regime, state-bin edges and
     their coverage of the regime's signal ranges, the action grid, softmax
     stability on extreme preferences, reward clipping on extreme rewards,
     learning-rate / exploration schedules, and the trace destination.
@@ -74,6 +74,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from .config import (
     AUDIT_LEVELS,
+    MAX_AGENT_BOTS,
+    MAX_AGENT_GENERATIONS,
     MAX_SHARD_DENSITY,
     RL_REGIMES,
     ConfigError,
@@ -216,6 +218,8 @@ R_DENSITY = _rule("signal.shard_density", E, "shard_density must be within [1, 6
 R_HEADROOM = _rule("signal.parallel_headroom", W, "fewer parallel tasks per stage than workers")
 R_PG = _rule("signal.pg_paths", E, "path fuzzer sizes must be valid")
 R_PG_IDLE = _rule("signal.pg_paths_ignored", I, "pg_paths is set but the mode does not run the path fuzzer")
+R_AGENTS = _rule("signal.agent_factory", E, "AI agent factory sizes must be valid")
+R_AGENTS_IDLE = _rule("signal.agent_factory_ignored", I, "agent_bots is set but the mode does not run the factory")
 R_REGIME = _rule("signal.rl_regime", E, "rl_regime must be calm, volatile or extreme")
 R_BINS = _rule("signal.rl_bins", E, "RL state-bin edges must be strictly increasing")
 R_BIN_COVER = _rule("signal.rl_bin_coverage", W, "an RL signal's bin edges never split the regime's range")
@@ -779,6 +783,7 @@ def check_signals(cfg: Any, col: Collector, cpus: Optional[int] = None) -> None:
     col.check(R_NATIVE, isinstance(native, str) and bool(native.strip()), "native_token", f"{native!r}")
     _check_parallel_signals(cfg, col, cpus)
     _check_path_signals(cfg, col)
+    _check_agent_signals(cfg, col)
     regime = getattr(cfg, "rl_regime", None)
     if col.check(R_REGIME, regime in RL_REGIMES, "rl_regime", f"rl_regime={regime!r}"):
         check_rl_signals(col, regime)
@@ -830,6 +835,18 @@ def _check_path_signals(cfg: Any, col: Collector) -> None:
     mode = getattr(cfg, "mode", None)
     if ok and paths and isinstance(mode, RunMode):
         col.check(R_PG_IDLE, mode.aggressive, "pg_paths", f"{mode.label} does not run the path fuzzer")
+
+
+def _check_agent_signals(cfg: Any, col: Collector) -> None:
+    bots, gens, size, slots = (getattr(cfg, n, None) for n in ("agent_bots", "agent_generations",
+                                                                 "agent_heat_size", "agent_heat_slots"))
+    ok = _int_in(bots, 0, MAX_AGENT_BOTS) and _int_in(gens, 1, MAX_AGENT_GENERATIONS) and _int_in(size, 1, None) \
+        and _int_in(slots, 1, None)
+    col.check(R_AGENTS, ok, "agent_bots", f"agent_bots={bots!r} agent_generations={gens!r} "
+                                          f"agent_heat_size={size!r} agent_heat_slots={slots!r}")
+    mode = getattr(cfg, "mode", None)
+    if ok and bots and isinstance(mode, RunMode):
+        col.check(R_AGENTS_IDLE, mode.aggressive, "agent_bots", f"{mode.label} does not run the AI agent factory")
 
 
 def check_rl_signals(col: Collector, regime: Optional[str] = None, bins: Any = None,
@@ -925,9 +942,11 @@ def _workload_note(cfg: Any, col: Collector) -> None:
         if mode.aggressive:
             pg = cfg.pg_paths * cfg.pg_path_steps
             rl = cfg.rl_rounds * 8 * cfg.shard_density * cfg.rl_steps_per_shard
+            heats = -(-cfg.agent_bots // max(1, cfg.agent_heat_size)) * cfg.agent_generations
             note = (f"{mode.label}: {cfg.blocks} blocks x {cfg.txs_per_block} txs, grid {cfg.frontrun_grid}, "
                     f"{cfg.fuzz_iterations} fuzz swaps, {cfg.layout_fuzz_iterations} layouts/slot, "
-                    f"{rl} RL steps, {pg} policy-gradient path steps on {cfg.workers} worker(s)")
+                    f"{rl} RL steps, {pg} policy-gradient path steps, {cfg.agent_bots} AI bots x "
+                    f"{cfg.agent_generations} generations ({heats} arena heats) on {cfg.workers} worker(s)")
         else:
             note = f"{mode.label}: {cfg.txs_per_block} txs quoted, {cfg.fuzz_iterations} fuzz swaps"
     except (AttributeError, TypeError):

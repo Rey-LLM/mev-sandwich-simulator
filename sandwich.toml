@@ -68,6 +68,10 @@ shard_density = 1                        # multiplier on every fixed shard / chu
 pg_paths = 0                             # policy-gradient paths fuzzed concurrently
 pg_path_steps = 16                       # steps per policy-gradient path
 pg_batch = 32                            # paths per worker task
+agent_bots = 0                           # AI-generated competitor bots per generation (0 = off)
+agent_generations = 2                    # AI factory generations (synthesise, deploy, retrain)
+agent_heat_size = 8                      # AI bots per arena heat (one worker task)
+agent_heat_slots = 12                    # blocks each AI arena heat simulates
 
 # Brutal Aggressive Simulation: multi-block sandwich search on the capped pool (50-60% of CPUs).
 [modes.brutal]
@@ -88,8 +92,12 @@ shard_density = 1                        # multiplier on every fixed shard / chu
 pg_paths = 0                             # policy-gradient paths fuzzed concurrently
 pg_path_steps = 16                       # steps per policy-gradient path
 pg_batch = 32                            # paths per worker task
+agent_bots = 0                           # AI-generated competitor bots per generation (0 = off)
+agent_generations = 2                    # AI factory generations (synthesise, deploy, retrain)
+agent_heat_size = 8                      # AI bots per arena heat (one worker task)
+agent_heat_slots = 12                    # blocks each AI arena heat simulates
 
-# MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz.
+# MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz, AI agent factory.
 [modes.max]
 workers = 0                              # worker processes (0 = automatic for the CPU policy)
 cpu_policy = "full"                      # capped = 50-60% of CPUs, full = 100% of logical CPUs
@@ -108,3 +116,7 @@ shard_density = 16                       # multiplier on every fixed shard / chu
 pg_paths = 4096                          # policy-gradient paths fuzzed concurrently
 pg_path_steps = 16                       # steps per policy-gradient path
 pg_batch = 32                            # paths per worker task
+agent_bots = 512                         # AI-generated competitor bots per generation (0 = off)
+agent_generations = 6                    # AI factory generations (synthesise, deploy, retrain)
+agent_heat_size = 8                      # AI bots per arena heat (one worker task)
+agent_heat_slots = 16                    # blocks each AI arena heat simulates
