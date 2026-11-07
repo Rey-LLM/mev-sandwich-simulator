@@ -1,4 +1,4 @@
-"""Layers 03 / 09 / 10 / 11: run modes, simulation presets and the CPU worker policy.
+"""Layers 03 / 09 / 10 / 11 / 12: run modes, simulation presets and the CPU worker policy.
 
 Three hardcoded execution modes (run matrices) drive the simulator:
 
@@ -39,6 +39,14 @@ generator conditioned on the RL results synthesises ``agent_bots`` competitor
 bot profiles per generation, deploys them in heats of ``agent_heat_size`` bots
 for ``agent_heat_slots`` blocks on the worker pool, and retrains itself on the
 winners for ``agent_generations`` generations.
+
+Layer 12 (``pattern_ingestor``) feeds that factory with MEV attack patterns
+from a local store (``pattern_store``; segments + SQLite index, capped at
+``pattern_max_storage_gb``). When the factory runs and ``pattern_seed_bps > 0``
+the store is scanned in parallel shards, the ``pattern_limit`` heaviest
+patterns pre-train the generator, and ``pattern_seed_bps`` of generation 0
+starts from them. Without a store, ``pattern_synthetic`` generated reference
+patterns (clearly marked ``source = "synthetic"``) are used instead.
 
 Layer 10 (:mod:`simulator.validator`) audits the configuration, the pools and
 the simulator's own source before any simulation loop starts; the ``audit_*``
@@ -83,6 +91,9 @@ WORKERS_ENV_VAR = "MEV_SIM_WORKERS"
 MAX_SHARD_DENSITY = 64
 MAX_PG_PATHS = 1_000_000
 MAX_AGENT_BOTS = 100_000
+MAX_PATTERN_LIMIT = 10_000_000
+MAX_PATTERN_SYNTHETIC = 1_000_000
+MAX_PATTERN_STORAGE_GB = 1_000_000
 MAX_AGENT_GENERATIONS = 1_000
 AUDIT_LEVELS = ("error", "warning", "info")
 RL_REGIMES = ("calm", "volatile", "extreme")
@@ -351,6 +362,14 @@ class SimulationConfig:
     agent_generations: int = 2  # synthesise -> deploy -> retrain rounds
     agent_heat_size: int = 8  # bots per arena heat (one worker task; fixed, so results never depend on workers)
     agent_heat_slots: int = 12  # blocks each heat simulates
+    # Layer 12: MEV pattern ingestion (0 seed bps = off).
+    pattern_store: str = ""  # pattern store directory; empty = synthetic reference patterns only
+    pattern_max_storage_gb: int = 500  # storage cap of the pattern store (segments + index)
+    pattern_segment_mb: int = 64  # segment file rotation size
+    pattern_cache_mb: int = 256  # decoded-record LRU cache budget
+    pattern_seed_bps: int = 0  # share of generation-0 AI bots seeded from stored patterns
+    pattern_limit: int = 4_096  # heaviest patterns loaded into the factory
+    pattern_synthetic: int = 0  # generated reference patterns used when no store is configured
     # Layer 10: pre-flight integrity audit and trace output.
     audit: bool = True  # run simulator.validator before any simulation loop
     audit_fail_on: str = "error"  # lowest finding severity that blocks a run: error | warning | info
@@ -404,6 +423,18 @@ class SimulationConfig:
             raise ConfigError(f"agent_generations must be within [1, {MAX_AGENT_GENERATIONS}]")
         if self.agent_heat_size < 1 or self.agent_heat_slots < 1:
             raise ConfigError("agent_heat_size and agent_heat_slots must be >= 1")
+        if not isinstance(self.pattern_store, str):
+            raise ConfigError("pattern_store must be a string")
+        if not 1 <= self.pattern_max_storage_gb <= MAX_PATTERN_STORAGE_GB:
+            raise ConfigError(f"pattern_max_storage_gb must be within [1, {MAX_PATTERN_STORAGE_GB}]")
+        if not 1 <= self.pattern_segment_mb <= 4_096 or not 0 <= self.pattern_cache_mb <= 1_048_576:
+            raise ConfigError("pattern_segment_mb must be within [1, 4096] and pattern_cache_mb within [0, 1048576]")
+        if not 0 <= self.pattern_seed_bps <= 10_000:
+            raise ConfigError("pattern_seed_bps must be within [0, 10000]")
+        if not 0 <= self.pattern_limit <= MAX_PATTERN_LIMIT:
+            raise ConfigError(f"pattern_limit must be within [0, {MAX_PATTERN_LIMIT}]")
+        if not 0 <= self.pattern_synthetic <= MAX_PATTERN_SYNTHETIC:
+            raise ConfigError(f"pattern_synthetic must be within [0, {MAX_PATTERN_SYNTHETIC}]")
         if self.audit_fail_on not in AUDIT_LEVELS:
             raise ConfigError(f"audit_fail_on must be one of {', '.join(AUDIT_LEVELS)}")
         if not 0 <= self.audit_tick_samples <= 100_000:
@@ -475,6 +506,13 @@ class SimulationConfig:
             "agent_generations": self.agent_generations,
             "agent_heat_size": self.agent_heat_size,
             "agent_heat_slots": self.agent_heat_slots,
+            "pattern_store": self.pattern_store,
+            "pattern_max_storage_gb": self.pattern_max_storage_gb,
+            "pattern_segment_mb": self.pattern_segment_mb,
+            "pattern_cache_mb": self.pattern_cache_mb,
+            "pattern_seed_bps": self.pattern_seed_bps,
+            "pattern_limit": self.pattern_limit,
+            "pattern_synthetic": self.pattern_synthetic,
             "audit": self.audit,
             "audit_fail_on": self.audit_fail_on,
             "audit_code_scan": self.audit_code_scan,
@@ -509,6 +547,9 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         agent_generations=2,
         agent_heat_size=8,
         agent_heat_slots=12,
+        pattern_seed_bps=0,
+        pattern_limit=4_096,
+        pattern_synthetic=0,
     ),
     RunMode.BRUTAL_AGGRESSIVE: dict(
         blocks=6,
@@ -531,6 +572,9 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         agent_generations=2,
         agent_heat_size=8,
         agent_heat_slots=12,
+        pattern_seed_bps=0,
+        pattern_limit=4_096,
+        pattern_synthetic=0,
     ),
     RunMode.MAX_BRUTAL: dict(
         blocks=8,
@@ -553,6 +597,9 @@ PRESETS: Dict[RunMode, Dict[str, Any]] = {
         agent_generations=6,
         agent_heat_size=8,
         agent_heat_slots=16,
+        pattern_seed_bps=5_000,
+        pattern_limit=4_096,
+        pattern_synthetic=3_072,
     ),
 }
 
@@ -567,6 +614,9 @@ __all__ = [
     "FULL_CPU_FRACTION",
     "MAX_AGENT_BOTS",
     "MAX_AGENT_GENERATIONS",
+    "MAX_PATTERN_LIMIT",
+    "MAX_PATTERN_STORAGE_GB",
+    "MAX_PATTERN_SYNTHETIC",
     "MAX_PG_PATHS",
     "MAX_SHARD_DENSITY",
     "MODE_KEYS",

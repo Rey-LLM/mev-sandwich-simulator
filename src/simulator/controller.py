@@ -1,4 +1,4 @@
-"""Layers 03-11: simulation controller.
+"""Layers 03-12: simulation controller.
 
 ``SimulationController`` is the single entry point that dispatches a run to
 the mode chosen in :class:`SimulationConfig`, owns the worker pool for the
@@ -29,6 +29,13 @@ Run matrices:
   ``agent_bots`` machine-generated competitor bots per generation on the
   same full-core worker pool. The factory needs NumPy and is imported only
   when it runs, so the other modes stay standard-library only.
+* Layer 12: when the factory runs and ``pattern_seed_bps > 0``,
+  :func:`ingest_patterns` scans the MEV pattern store (``pattern_store``) in
+  ``PATTERN_SHARDS * shard_density`` fixed shards on the same worker pool and
+  hands the ``pattern_limit`` heaviest patterns to the factory; without a
+  store it builds a temporary store of ``pattern_synthetic`` generated
+  reference patterns. The ``agent_factory`` section then carries
+  ``pattern_ingestion`` and ``patterns``.
 
 Every report carries ``audit`` (the pre-flight result) and ``resources``
 (worker-pool telemetry: processes, tasks, CPU seconds and utilization).
@@ -40,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from fractions import Fraction
@@ -58,6 +66,7 @@ from .validator import AuditReport, IntegrityError, IntegrityValidator
 
 E18 = 10**18
 E6 = 10**6
+PATTERN_SHARDS = 4  # pattern-store scan shards per unit of shard_density
 TRACE_LOGGER = "simulator.block_builder"
 
 
@@ -193,7 +202,38 @@ def run_agent_factory(cfg: SimulationConfig, executor: Optional[WorkerPool], bod
     factory = AgentFactory.for_config(cfg)
     table = rl.last_train.table if rl is not None and rl.last_train is not None else None
     factory.ingest(reinforcement=body.get("reinforcement"), table=table, policy_paths=body.get("policy_paths"))
-    return factory.run(executor=executor).summary()
+    ingestion = ingest_patterns(cfg, factory, executor)
+    summary = factory.run(executor=executor).summary()
+    if ingestion:
+        summary["pattern_ingestion"] = ingestion
+    return summary
+
+
+def ingest_patterns(cfg: SimulationConfig, factory: Any, executor: Optional[WorkerPool]) -> Dict[str, Any]:
+    """Layer 12: load MEV patterns into ``factory`` (the configured store, else a synthetic reference store)."""
+    if cfg.pattern_seed_bps <= 0 or cfg.pattern_limit <= 0:
+        return {}
+    from .pattern_ingestor import MIB, PatternStore, open_store, parallel_scan, synthetic_corpus
+
+    shards = cfg.shards(PATTERN_SHARDS)
+    if cfg.pattern_store:
+        with open_store(cfg, readonly=True) as store:
+            stats = store.stats()
+        scan = parallel_scan(cfg.pattern_store, executor, shards=shards, limit=cfg.pattern_limit,
+                             cache_bytes=cfg.pattern_cache_mb * MIB)
+        origin = {"store": cfg.pattern_store, "synthetic": False, "stored_patterns": stats["patterns"],
+                  "bytes_used": stats["bytes_used"], "max_storage_bytes": stats["max_storage_bytes"]}
+    elif cfg.pattern_synthetic > 0:
+        with tempfile.TemporaryDirectory(prefix="mev-patterns-") as root:
+            with PatternStore(root, segment_bytes=cfg.pattern_segment_mb * MIB) as store:
+                added = store.add(synthetic_corpus(cfg.pattern_synthetic, cfg.seed)).added
+                used = store.bytes_used()
+            scan = parallel_scan(root, executor, shards=shards, limit=cfg.pattern_limit,
+                                 cache_bytes=cfg.pattern_cache_mb * MIB)
+        origin = {"store": None, "synthetic": True, "stored_patterns": added, "bytes_used": used}
+    else:
+        return {}
+    return {**origin, **factory.ingest_patterns(scan)}
 
 
 def run(mode: Any = RunMode.MODERATE_SCAN, **overrides: Any) -> Dict[str, Any]:
@@ -201,5 +241,6 @@ def run(mode: Any = RunMode.MODERATE_SCAN, **overrides: Any) -> Dict[str, Any]:
     return SimulationController(SimulationConfig.for_mode(mode, workers=workers, **overrides)).run()
 
 
-__all__ = ["TRACE_LOGGER", "SimulationController", "demo_market", "invariants_ok", "run", "run_agent_factory",
+__all__ = ["PATTERN_SHARDS", "TRACE_LOGGER", "SimulationController", "demo_market", "ingest_patterns", "invariants_ok",
+           "run", "run_agent_factory",
            "trace_logging"]

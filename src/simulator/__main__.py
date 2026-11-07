@@ -22,6 +22,16 @@ Actions (each runs instead of a simulation and then exits):
 ``--audit-rules``   print the integrity rule catalog (JSON)
 ``--cpu-probe S``   saturate the worker pool for S seconds and print its telemetry
 
+MEV pattern store actions (Layer 12; the store is ``[patterns] store`` /
+``--pattern-store DIR``):
+
+``--ingest-patterns FILE...``       normalise JSON / JSONL / CSV exports into the store
+``--build-synthetic-patterns N``    add N generated reference patterns (``source = "synthetic"``)
+``--pattern-stats``                 print counts, category means and storage use
+``--pattern-verify``                stream every segment and check it against the index
+``--export-patterns FILE``          write the store as normalised JSONL
+``--pattern-source NAME``           force the parser for ``--ingest-patterns``
+
 Exit codes: 0 success; 1 an invariant failed during the run; 2 invalid
 settings, a settings file that cannot be read or written safely, or a
 blocking integrity-audit finding.
@@ -89,6 +99,16 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--audit-rules", action="store_true", help="print the integrity rule catalog as JSON")
     actions.add_argument("--cpu-probe", type=float, metavar="SECONDS",
                          help="saturate the worker pool for SECONDS and print utilization telemetry")
+    actions.add_argument("--ingest-patterns", nargs="+", metavar="FILE",
+                         help="normalise MEV pattern exports (JSON, JSONL, CSV) into the pattern store")
+    actions.add_argument("--build-synthetic-patterns", type=int, metavar="N",
+                         help="add N generated reference patterns to the pattern store")
+    actions.add_argument("--pattern-stats", action="store_true", help="print pattern store statistics")
+    actions.add_argument("--pattern-verify", action="store_true",
+                         help="check every pattern segment frame against the index")
+    actions.add_argument("--export-patterns", metavar="FILE", help="export the pattern store as JSONL")
+    files.add_argument("--pattern-source", choices=("flashbots_blocks", "mev_inspect", "advisory", "normalized"),
+                       help="parser for --ingest-patterns (default: detected per object)")
     add_setting_arguments(parser)
     return parser
 
@@ -204,6 +224,10 @@ def _main(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
                    "saturation": saturation, "telemetry": wp.telemetry()}, out)
         return EXIT_OK
 
+    if (args.ingest_patterns or args.build_synthetic_patterns is not None or args.pattern_stats
+            or args.pattern_verify or args.export_patterns):
+        return _pattern_action(args, cfg, out, err)
+
     controller = SimulationController(cfg)
     try:
         report = controller.run()
@@ -213,6 +237,39 @@ def _main(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         raise
     _dump(report, out)
     return EXIT_OK if invariants_ok(report) else EXIT_INVARIANT
+
+
+def _pattern_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO, err: TextIO) -> int:
+    from .pattern_ingestor import IngestReport, open_store, synthetic_corpus, write_jsonl
+
+    if not cfg.pattern_store:
+        raise ConfigError("pattern store actions need --pattern-store DIR (or [patterns] store in sandwich.toml)")
+    reading = args.pattern_stats or args.pattern_verify or args.export_patterns
+    with open_store(cfg, readonly=bool(reading)) as store:
+        if args.ingest_patterns:
+            total = IngestReport()
+            files = []
+            for path in args.ingest_patterns:
+                rep = store.ingest_file(path, source=args.pattern_source)
+                files.append({"file": path, **rep.to_dict()})
+                total.merge(rep)
+            _warn(total.errors[:20], err)
+            _dump({"total": total.to_dict(), "files": files, "store": store.stats()}, out)
+        elif args.build_synthetic_patterns is not None:
+            if args.build_synthetic_patterns < 0:
+                raise ConfigError("--build-synthetic-patterns needs a non-negative count")
+            rep = store.add(synthetic_corpus(args.build_synthetic_patterns, cfg.seed))
+            _dump({"added": rep.to_dict(), "store": store.stats()}, out)
+        elif args.pattern_stats:
+            _dump(store.stats(), out)
+        elif args.pattern_verify:
+            report = store.verify()
+            _dump(report, out)
+            return EXIT_OK if report["ok"] else EXIT_INVARIANT
+        else:
+            n = write_jsonl(store.records(), args.export_patterns)
+            _dump({"exported": n, "file": args.export_patterns}, out)
+    return EXIT_OK
 
 
 if __name__ == "__main__":

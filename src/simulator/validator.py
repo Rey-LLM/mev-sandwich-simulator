@@ -31,7 +31,8 @@ rule families are checked:
     uint256 with a block limit in ``[21000, 30M]`` (and room for a sandwich),
     counts non-negative, the CPU policy and worker count against this
     machine, the multiprocessing start method available on this platform,
-    shard density, path-fuzzer and AI agent factory sizes, the RL regime, state-bin edges and
+    shard density, path-fuzzer and AI agent factory sizes, the MEV pattern store
+    settings (Layer 12), the RL regime, state-bin edges and
     their coverage of the regime's signal ranges, the action grid, softmax
     stability on extreme preferences, reward clipping on extreme rewards,
     learning-rate / exploration schedules, and the trace destination.
@@ -220,6 +221,8 @@ R_PG = _rule("signal.pg_paths", E, "path fuzzer sizes must be valid")
 R_PG_IDLE = _rule("signal.pg_paths_ignored", I, "pg_paths is set but the mode does not run the path fuzzer")
 R_AGENTS = _rule("signal.agent_factory", E, "AI agent factory sizes must be valid")
 R_AGENTS_IDLE = _rule("signal.agent_factory_ignored", I, "agent_bots is set but the mode does not run the factory")
+R_PATTERNS = _rule("signal.pattern_store", E, "MEV pattern settings must be valid and the store must exist")
+R_PATTERNS_IDLE = _rule("signal.pattern_seed_ignored", I, "pattern_seed_bps is set but no AI factory runs")
 R_REGIME = _rule("signal.rl_regime", E, "rl_regime must be calm, volatile or extreme")
 R_BINS = _rule("signal.rl_bins", E, "RL state-bin edges must be strictly increasing")
 R_BIN_COVER = _rule("signal.rl_bin_coverage", W, "an RL signal's bin edges never split the regime's range")
@@ -784,6 +787,7 @@ def check_signals(cfg: Any, col: Collector, cpus: Optional[int] = None) -> None:
     _check_parallel_signals(cfg, col, cpus)
     _check_path_signals(cfg, col)
     _check_agent_signals(cfg, col)
+    _check_pattern_signals(cfg, col)
     regime = getattr(cfg, "rl_regime", None)
     if col.check(R_REGIME, regime in RL_REGIMES, "rl_regime", f"rl_regime={regime!r}"):
         check_rl_signals(col, regime)
@@ -847,6 +851,26 @@ def _check_agent_signals(cfg: Any, col: Collector) -> None:
     mode = getattr(cfg, "mode", None)
     if ok and bots and isinstance(mode, RunMode):
         col.check(R_AGENTS_IDLE, mode.aggressive, "agent_bots", f"{mode.label} does not run the AI agent factory")
+
+
+def _check_pattern_signals(cfg: Any, col: Collector) -> None:
+    store, cap, seed, limit, synthetic = (getattr(cfg, n, None) for n in (
+        "pattern_store", "pattern_max_storage_gb", "pattern_seed_bps", "pattern_limit", "pattern_synthetic"))
+    if seed is None:
+        return
+    ok = isinstance(store, str) and _int_in(cap, 1, None) and _int_in(seed, 0, 10_000) and _int_in(limit, 0, None) \
+        and _int_in(synthetic, 0, None)
+    detail = f"pattern_store={store!r} max_storage_gb={cap!r} seed_bps={seed!r} limit={limit!r}"
+    if ok and store and seed:
+        root = Path(store)
+        ok = (root / "index.sqlite").is_file()
+        detail = f"no pattern store at {store!r} (create one with --ingest-patterns or --build-synthetic-patterns)"
+    col.check(R_PATTERNS, ok, "pattern_store", detail)
+    mode = getattr(cfg, "mode", None)
+    if ok and seed and isinstance(mode, RunMode):
+        runs = mode.aggressive and bool(getattr(cfg, "agent_bots", 0))
+        col.check(R_PATTERNS_IDLE, runs, "pattern_seed_bps",
+                  f"{mode.label} with agent_bots={getattr(cfg, 'agent_bots', 0)} does not run the AI factory")
 
 
 def check_rl_signals(col: Collector, regime: Optional[str] = None, bins: Any = None,

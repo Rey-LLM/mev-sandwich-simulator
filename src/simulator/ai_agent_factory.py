@@ -1,4 +1,4 @@
-"""Layer 11: local embedded AI agent factory (machine-generated competitor bots).
+"""Layers 11-12: local embedded AI agent factory (machine-generated competitor bots, pattern-seeded).
 
 The factory scripts, mutates and spins up its own competitor searcher bots at
 runtime, deploys hundreds of them at once against the Layer 08 RL policy on
@@ -89,6 +89,24 @@ success rule, where success means beating the incumbent RL policy in the
 same heat. The engine's weights, the genes, the profiles and the
 allocations are checked against :data:`FACTORY_RULES` on every generation.
 
+Pattern-derived bots (Layer 12)
+-------------------------------
+:meth:`AgentFactory.ingest_patterns` reads attack patterns from the local
+:mod:`simulator.pattern_ingestor` store (in parallel shards on the worker
+pool) or from a list of records. Every pattern is replayed on a
+constant-product pool to evaluate its slippage parameters, mapped onto the
+arena's gene space by :func:`profile_from_pattern` (category -> bidding rule
+and hop policy; bribe -> builder share; priority fee -> tip range;
+front-run impact -> ``max_impact_bps``; victim tolerance -> slippage floor;
+hops and pools -> path genes; latency and capital directly) and given a
+deterministic latent from its hash. Before generation 0 the generator is
+pre-trained on ``([RL features, pattern latent], pattern genes)`` weighted
+by :func:`~simulator.pattern_ingestor.pattern_weight`, and
+``pattern_seed_bps`` of generation 0 starts from pattern latents (heaviest
+patterns first), so those bots are synthesised by the network from what it
+learned about the patterns, then mutated, deployed and ranked like any
+other bot. The report's ``patterns`` section compares seeded and fresh bots.
+
 Limits: v2 pools only in the arena, victims of at most two hops, a greedy
 builder, sampled latencies, and a generator conditioned on one RL report per
 run (its features are constant within a run; diversity comes from the
@@ -134,6 +152,15 @@ from .config import ConfigError
 from .invariants import input_reserve_scale
 from .mempool_emulator import estimate_swap_gas, geometric_grid
 from .parallel import WorkerPool, chunked
+from .pattern_ingestor import (
+    CATEGORIES as PATTERN_CATEGORIES,
+    PatternRecord,
+    PatternStore,
+    ScanResult,
+    evaluate_pattern,
+    parallel_scan,
+    pattern_weight,
+)
 from .reinforcement_engine import REGIMES, Action, ActionTable, Observation, StateBins, _seed_int, action_grid
 from .slippage_engine import V2Pool, _direction, min_amount_out
 from .state_fork import SwapReverted
@@ -259,6 +286,7 @@ FACTORY_RULES: Tuple[str, ...] = (
     "ai.single_winner",
     "ai.exact_pnl",
     "ai.idle_balances",
+    "ai.pattern_seeding",
 )
 
 
@@ -1817,6 +1845,11 @@ class Population:
     requested_capital: List[int]
     parents: List[Optional[int]]
     resampled: int = 0
+    pattern_sources: List[Optional[str]] = field(default_factory=list)
+
+    @property
+    def seeded(self) -> int:
+        return sum(1 for h in self.pattern_sources if h is not None)
 
     @property
     def latents(self) -> np.ndarray:
@@ -1863,6 +1896,7 @@ class FactoryReport:
     workers: int
     parallel: bool
     worker_pids: List[int]
+    patterns: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -1898,6 +1932,7 @@ class FactoryReport:
             "strategy_mix": dict(sorted(Counter(p.strategy for p in self.last_profiles).items())),
             "hop_policy_mix": dict(sorted(Counter(p.hop_policy for p in self.last_profiles).items())),
             "top_bots": [dict(b) for b in self.top_bots],
+            **({"patterns": dict(self.patterns)} if self.patterns else {}),
             "invariants": {
                 "ok": self.ok,
                 "rules": list(FACTORY_RULES),
@@ -1917,13 +1952,16 @@ class AgentFactory:
                  lr: float = 0.01, init: str = "xavier", mutation: Optional[AdaptiveMutation] = None,
                  capital_per_bot_wei: int = 50 * E18, capital_floor_wei: int = E18,
                  base_fee_wei: int = 20 * GWEI, gas_limit: int = BLOCK_GAS_LIMIT, grid: int = 10, refine: int = 5,
-                 violation_limit: int = VIOLATION_LIMIT, max_resample: int = 8) -> None:
+                 violation_limit: int = VIOLATION_LIMIT, max_resample: int = 8, pattern_seed_bps: int = 0,
+                 pattern_epochs: int = 60) -> None:
         if bots < 0 or generations < 1 or heat_size < 1 or heat_slots < 1 or victims_per_slot < 1:
             raise ConfigError("bots must be >= 0; generations, heat_size, heat_slots, victims_per_slot >= 1")
         if latent_dim < 0 or epochs < 0 or not 0 < elite_frac <= 1:
             raise ConfigError("latent_dim and epochs must be >= 0 and elite_frac within (0, 1]")
         if capital_per_bot_wei < 0 or capital_floor_wei < 0 or max_resample < 0:
             raise ConfigError("capital settings and max_resample must be non-negative")
+        if not 0 <= pattern_seed_bps <= BPS or pattern_epochs < 0:
+            raise ConfigError("pattern_seed_bps must be within [0, 10000] and pattern_epochs >= 0")
         self.bots = bots
         self.generations = generations
         self.heat_size = heat_size
@@ -1946,6 +1984,11 @@ class AgentFactory:
         self.mutation = mutation if mutation is not None else AdaptiveMutation()
         self.metrics = RLMetrics.neutral(regime)
         self.incumbent = IncumbentPolicy.default()
+        self.pattern_seed_bps = pattern_seed_bps
+        self.pattern_epochs = pattern_epochs
+        self.prior: Optional[PatternPrior] = None
+        self.pretrain_losses: Tuple[float, float] = (0.0, 0.0)
+        self._pretrained = False
 
     @classmethod
     def for_config(cls, config: Any, **overrides: Any) -> "AgentFactory":
@@ -1953,7 +1996,8 @@ class AgentFactory:
         params: Dict[str, Any] = dict(
             bots=config.agent_bots, generations=config.agent_generations, heat_size=config.agent_heat_size,
             heat_slots=config.agent_heat_slots, seed=config.seed, regime=config.rl_regime,
-            base_fee_wei=config.base_fee_wei, gas_limit=config.block_gas_limit)
+            base_fee_wei=config.base_fee_wei, gas_limit=config.block_gas_limit,
+            pattern_seed_bps=getattr(config, "pattern_seed_bps", 0))
         params.update(overrides)
         return cls(**params)
 
@@ -1968,6 +2012,57 @@ class AgentFactory:
         if table is not None:
             self.incumbent = IncumbentPolicy.from_table(table, actions)
         return self.metrics
+
+    def ingest_patterns(self, source: Any, executor: Optional[WorkerPool] = None, limit: Optional[int] = None,
+                        shards: int = 32) -> Dict[str, Any]:
+        """Load attack patterns (a store, its path, a :class:`ScanResult` or records) as the generator prior.
+
+        A store is scanned in ``shards`` fixed id shards on ``executor``;
+        ``limit`` keeps the heaviest patterns. The generator is pre-trained
+        on them when :meth:`run` starts (after any RL :meth:`ingest`).
+        """
+        if isinstance(source, ScanResult):
+            scan: Optional[ScanResult] = source
+        elif isinstance(source, (str, os.PathLike, PatternStore)):
+            root = source.root if isinstance(source, PatternStore) else source
+            scan = parallel_scan(root, executor, shards=shards, limit=limit)
+        else:
+            scan = None
+        if scan is not None:
+            records, weights = scan.records, scan.weights
+        else:
+            records = list(source)
+            weights = [pattern_weight(r) for r in records]
+            if limit is not None:
+                keep = sorted(range(len(records)), key=lambda i: (-weights[i], i))[: max(0, limit)]
+                keep.sort()
+                records, weights = [records[i] for i in keep], [weights[i] for i in keep]
+        self.prior = PatternPrior.build(records, weights, self.latent_dim)
+        self._pretrained = False
+        out = self.prior.summary()
+        if scan is not None:
+            out["scan"] = scan.summary()
+        return out
+
+    def pretrain(self) -> Tuple[float, float]:
+        """Fit the generator on the pattern prior (``([features, latent], genes)``, pattern weights)."""
+        if self.prior is None or not len(self.prior) or self.pattern_epochs == 0:
+            self._pretrained = True
+            return self.pretrain_losses
+        x = np.hstack([np.tile(self.metrics.vector(), (len(self.prior), 1)), self.prior.latents])
+        losses = self.engine.fit(x, self.prior.genes, self.prior.weights, self.pattern_epochs)
+        self.pretrain_losses = (losses[0], losses[-1])
+        self._pretrained = True
+        return self.pretrain_losses
+
+    def seed_plan(self, n: Optional[int] = None) -> List[int]:
+        """Prior indices for the pattern-seeded rows of generation 0 (heaviest first, cycling)."""
+        n = self.bots if n is None else n
+        if self.prior is None or not len(self.prior) or self.pattern_seed_bps == 0:
+            return []
+        k = n * self.pattern_seed_bps // BPS
+        order = self.prior.ranked()
+        return [order[i % len(order)] for i in range(k)]
 
     # -- synthesis -----------------------------------------------------------
 
@@ -1994,6 +2089,16 @@ class AgentFactory:
         """
         n = self.bots
         x = self.inputs(generation, parents, parent_latents)
+        plan = self.seed_plan(n) if parents is None and generation == 0 else []
+        sources: List[Optional[str]] = [None] * n
+        if plan:
+            if not self._pretrained:
+                self.pretrain()
+            prior = self.prior
+            assert prior is not None
+            x[: len(plan), N_FEATURES:] = prior.latents[plan]
+            for i, j in enumerate(plan):
+                sources[i] = prior.hashes[j]
         raw = self.engine.forward(x) if n else np.zeros((0, N_GENES))
         genes = self.mutation.mutate_genes(raw, seeded_generator("mutation", self.seed, generation)) if n \
             else np.zeros((0, N_GENES))
@@ -2015,7 +2120,7 @@ class AgentFactory:
         granted = allocate_capital(requested, self.capital_per_bot_wei * n, self.capital_floor_wei) if n else []
         profiles = [replace(p, capital_wei=c) for p, c in zip(profiles, granted)]
         lineage_ = list(parents) if parents is not None else [None] * n
-        return Population(generation, profiles, x, genes, requested, lineage_, resampled)
+        return Population(generation, profiles, x, genes, requested, lineage_, resampled, sources)
 
     def tasks(self, population: Population) -> Tuple[List[List[int]], List[Tuple[Any, ...]]]:
         heats = plan_heats(len(population.profiles), self.heat_size, self.seed, population.generation)
@@ -2065,11 +2170,20 @@ class AgentFactory:
                 if len(violations) < self.violation_limit:
                     violations.append({"rule": rule, "generation": generation, "detail": detail})
 
+        pattern_info: Dict[str, Any] = {}
         try:
+            if self.prior is not None and not self._pretrained:
+                self.pretrain()
             for g in range(self.generations):
                 pop = self.synthesize(g, parents, parent_latents)
                 n = len(pop.profiles)
                 last_profiles = pop.profiles
+                if g == 0 and self.prior is not None:
+                    plan = self.seed_plan(n)
+                    known = set(self.prior.hashes)
+                    check("ai.pattern_seeding", pop.seeded == len(plan)
+                          and all(h in known for h in pop.pattern_sources if h is not None),
+                          f"{pop.seeded} seeded bots for a plan of {len(plan)}", g)
                 # -- synthesis invariants ------------------------------------------
                 check("ai.gene_bounds", bool(np.all((pop.genes >= 0.0) & (pop.genes <= 1.0))),
                       "a gene left [0, 1]", g)
@@ -2137,6 +2251,8 @@ class AgentFactory:
                     self.mutation.update(success)
                 check("ai.sigma_bounds", self.mutation.sigma_min <= self.mutation.sigma <= self.mutation.sigma_max,
                       f"sigma {self.mutation.sigma}", g)
+                if g == 0 and self.prior is not None:
+                    pattern_info = self._pattern_section(pop, pnl, beat, order=rank_order(keys))
                 parents = lineage(offspring) if n else None
                 parent_latents = pop.latents
                 parent_keys = keys
@@ -2183,8 +2299,169 @@ class AgentFactory:
                         "elite_offspring": [{"bot": last_profiles[i].name, "children": c}
                                             for i, c in list(offspring.items())[:8]] if last_profiles else []},
             elapsed_s=time.perf_counter() - started, cpu_s=cpu, workers=n_workers, parallel=parallel,
-            worker_pids=pids,
+            worker_pids=pids, patterns=pattern_info,
         )
+
+    def _pattern_section(self, pop: Population, pnl: Sequence[int], beat: Sequence[bool],
+                         order: Sequence[int]) -> Dict[str, Any]:
+        """Generation-0 comparison of pattern-seeded and fresh bots, plus the prior summary."""
+        prior = self.prior
+        assert prior is not None
+        seeded = [i for i, h in enumerate(pop.pattern_sources) if h is not None]
+        fresh = [i for i, h in enumerate(pop.pattern_sources) if h is None]
+        index = {h: j for j, h in enumerate(prior.hashes)}
+        errors = [float(np.mean(np.abs(pop.genes[i] - prior.genes[index[pop.pattern_sources[i]]])))  # type: ignore[index]
+                  for i in seeded]
+        cats = Counter(prior.categories[index[pop.pattern_sources[i]]] for i in seeded)  # type: ignore[index]
+        top = list(order[:10])
+
+        def mean(idx: Sequence[int]) -> int:
+            return sum(pnl[i] for i in idx) // len(idx) if idx else 0
+
+        return {
+            **prior.summary(),
+            "seed_bps": self.pattern_seed_bps,
+            "seeded_bots": len(seeded),
+            "seeded_by_category": {c: cats.get(c, 0) for c in PATTERN_CATEGORIES},
+            "pretrain_loss_before": round(self.pretrain_losses[0], 9),
+            "pretrain_loss_after": round(self.pretrain_losses[1], 9),
+            "gene_error_mean": round(sum(errors) / len(errors), 9) if errors else 0.0,
+            "seeded_mean_pnl_wei": mean(seeded),
+            "fresh_mean_pnl_wei": mean(fresh),
+            "seeded_beat_incumbent": sum(1 for i in seeded if beat[i]),
+            "fresh_beat_incumbent": sum(1 for i in fresh if beat[i]),
+            "seeded_in_top10": sum(1 for i in top if pop.pattern_sources[i] is not None),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Layer 12: pattern-derived profiles
+# ---------------------------------------------------------------------------
+
+CATEGORY_STRATEGY: Dict[str, str] = {
+    "multi_hop_frontrun": CompetitorStrategy.ADAPTIVE.value,
+    "jit_liquidity": CompetitorStrategy.FIXED_SHARE.value,
+    "multi_pool_sandwich": CompetitorStrategy.ADAPTIVE.value,
+    "cross_chain_drift": CompetitorStrategy.STATIC_TIP.value,
+}
+CATEGORY_HOP_POLICY: Dict[str, str] = {
+    "multi_hop_frontrun": "first",
+    "jit_liquidity": "oracle",
+    "multi_pool_sandwich": "deepest",
+    "cross_chain_drift": "last",
+}
+
+
+def _bound(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, int(v)))
+
+
+def _quantize(v: int, lo: int, hi: int, quantum: int) -> int:
+    return _bound(v // quantum * quantum, lo, hi)
+
+
+def profile_from_pattern(record: PatternRecord, name: str, generation: int = 0,
+                         evaluation: Any = None) -> BotProfile:
+    """Map an ingested pattern onto the arena's strategy space (see the module docstring)."""
+    ev = evaluation if evaluation is not None else evaluate_pattern(record)
+    digest = record.digest()
+    strategy = CATEGORY_STRATEGY[record.category]
+    share = _bound(record.bribe_bps or 8_000, *SHARE_RANGE)
+    band = 1_000 if strategy == CompetitorStrategy.ADAPTIVE.value else 0
+    tip_min = _quantize(record.priority_fee_wei or GWEI, TIP_MIN_RANGE[0], TIP_MIN_RANGE[1], TIP_QUANTUM)
+    tip_max = min(TIP_CAP_WEI, tip_min * (3 if band else 1))
+    n_pools = _bound(record.pools, 1, len(ARENA_POOLS))
+    start = int(digest[:8], 16) % len(ARENA_POOLS)
+    chosen = {ARENA_POOLS[(start + i) % len(ARENA_POOLS)] for i in range(n_pools)}
+    latency = _bound(record.latency_ms or 200, *LATENCY_RANGE)
+    return BotProfile(
+        name=name,
+        strategy=strategy,
+        share_bps=share,
+        step_bps=250 if band else SHARE_STEP_RANGE[0],
+        min_share_bps=max(0, share - band),
+        max_share_bps=min(BPS, share + band),
+        tip_min_wei=tip_min,
+        tip_max_wei=tip_max,
+        tip_step_bps=500 if band else 0,
+        size_bps=_bound(ev.utilization_bps or BPS, *SIZE_RANGE),
+        max_impact_bps=_bound(record.frontrun_impact_bps or IMPACT_RANGE[0], *IMPACT_RANGE),
+        slippage_floor_bps=_bound(record.victim_tolerance_bps, *SLIPPAGE_FLOOR_RANGE),
+        max_hops=2 if record.hops >= 2 else 1,
+        hop_policy=CATEGORY_HOP_POLICY[record.category],
+        target_pools=tuple(p for p in ARENA_POOLS if p in chosen),
+        bundle_slots=_bound(record.pools, 1, MAX_BUNDLE_SLOTS),
+        front_slack_bps=_bound(record.victim_slippage_bps // 4, *FRONT_SLACK_RANGE),
+        latency_ms=latency,
+        jitter_ms=_bound(latency // 5, *JITTER_RANGE),
+        capital_wei=_quantize(record.capital_wei or 50 * E18, CAPITAL_RANGE[0], CAPITAL_RANGE[1], CAPITAL_QUANTUM),
+        generation=int(generation),
+    )
+
+
+def pattern_latent(digest: str, latent_dim: int) -> np.ndarray:
+    """A pattern's fixed latent vector (standard normal, seeded by its hash)."""
+    return seeded_generator("pattern-latent", digest).standard_normal(latent_dim)
+
+
+@dataclass
+class PatternPrior:
+    """Ingested patterns as generator training data: hashes, profiles, genes, latents and weights."""
+
+    hashes: List[str]
+    categories: List[str]
+    profiles: List[BotProfile]
+    genes: np.ndarray
+    latents: np.ndarray
+    weights: np.ndarray
+    feasible: int = 0
+
+    def __len__(self) -> int:
+        return len(self.hashes)
+
+    @classmethod
+    def build(cls, records: Sequence[PatternRecord], weights: Optional[Sequence[float]] = None,
+              latent_dim: int = 8) -> "PatternPrior":
+        records = list(records)
+        if weights is None:
+            weights = [pattern_weight(r) for r in records]
+        if len(weights) != len(records):
+            raise ConfigError("need one weight per pattern")
+        hashes: List[str] = []
+        cats: List[str] = []
+        profiles: List[BotProfile] = []
+        keep: List[float] = []
+        feasible = 0
+        seen: set = set()
+        for r, w in zip(records, weights):
+            h = r.digest()
+            if h in seen:
+                continue
+            seen.add(h)
+            ev = evaluate_pattern(r)
+            feasible += ev.victim_limit_held
+            hashes.append(h)
+            cats.append(r.category)
+            profiles.append(profile_from_pattern(r, f"pattern-{h[:12]}", 0, ev))
+            keep.append(float(w))
+        genes = np.array([encode_profile(p) for p in profiles], dtype=np.float64).reshape(-1, N_GENES)
+        latents = np.array([pattern_latent(h, latent_dim) for h in hashes],
+                           dtype=np.float64).reshape(-1, latent_dim)
+        return cls(hashes, cats, profiles, genes, latents, np.array(keep, dtype=np.float64), feasible)
+
+    def ranked(self) -> List[int]:
+        """Indices by weight (heaviest first), ties by hash."""
+        return sorted(range(len(self)), key=lambda i: (-self.weights[i], self.hashes[i]))
+
+    def summary(self) -> Dict[str, Any]:
+        counts = Counter(self.categories)
+        return {
+            "patterns": len(self),
+            "by_category": {c: counts.get(c, 0) for c in PATTERN_CATEGORIES},
+            "feasible": self.feasible,
+            "mean_weight": round(float(np.mean(self.weights)), 6) if len(self) else 0.0,
+            "strategy_mix": dict(sorted(Counter(p.strategy for p in self.profiles).items())),
+        }
 
 
 __all__ = [
@@ -2204,6 +2481,9 @@ __all__ = [
     "AdaptiveMutation",
     "AgentFactory",
     "ArenaConfig",
+    "CATEGORY_HOP_POLICY",
+    "CATEGORY_STRATEGY",
+    "PatternPrior",
     "BotArena",
     "BotPlan",
     "BotProfile",
@@ -2231,8 +2511,10 @@ __all__ = [
     "init_matrix",
     "init_std",
     "lineage",
+    "pattern_latent",
     "plan_heats",
     "profile_from_competitor",
+    "profile_from_pattern",
     "profile_issues",
     "rank_order",
     "reflect_unit",

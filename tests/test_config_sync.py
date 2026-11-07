@@ -121,7 +121,9 @@ SAMPLES = {
     "router_max_hops": ("2", 2), "rl_rounds": ("2", 2), "rl_steps_per_shard": ("7", 7),
     "rl_eval_steps": ("11", 11), "shard_density": ("3", 3), "pg_paths": ("13", 13), "pg_path_steps": ("5", 5),
     "pg_batch": ("4", 4), "agent_bots": ("24", 24), "agent_generations": ("3", 3), "agent_heat_size": ("6", 6),
-    "agent_heat_slots": ("5", 5),
+    "agent_heat_slots": ("5", 5), "pattern_store": ("/tmp/mev-patterns", "/tmp/mev-patterns"),
+    "pattern_max_storage_gb": ("100", 100), "pattern_segment_mb": ("8", 8), "pattern_cache_mb": ("32", 32),
+    "pattern_seed_bps": ("2500", 2500), "pattern_limit": ("512", 512), "pattern_synthetic": ("64", 64),
 }
 
 

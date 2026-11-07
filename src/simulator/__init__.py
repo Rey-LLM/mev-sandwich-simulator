@@ -40,7 +40,16 @@ layout - spins up a Python class per bot at runtime, deploys hundreds of
 them per generation in parallel arena heats against the RL incumbent through
 one block-building queue, and retrains on the winners with adaptive
 mutation and exact capital / offspring allocation). It is the only module
-that needs NumPy.
+that needs NumPy at import time.
+Layer 12: ``pattern_ingestor`` (MEV pattern ingestion: normalisers for
+Flashbots blocks-API exports, mev-inspect-py sandwich rows, security
+advisories and normalised JSON / JSONL / CSV, a seeded synthetic reference
+corpus; a local store of CRC-framed segments plus an SQLite index with a
+500 GiB default cap, chunked streaming reads and a byte-budgeted LRU cache;
+four category matrices; exact v2 slippage evaluation; parallel shard scans
+on the worker pool). ``ai_agent_factory`` pre-trains its generator on the
+stored patterns and seeds part of generation 0 from them. NumPy is imported
+only for ``PatternStore.matrix``.
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"

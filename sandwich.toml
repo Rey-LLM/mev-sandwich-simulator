@@ -49,6 +49,12 @@ fail_on = "error"                        # lowest finding severity that blocks a
 code_scan = true                         # include the source code scan
 tick_samples = 256                       # ticks sampled by the tick-arithmetic checks
 
+[patterns]
+store = ""                               # MEV pattern store directory (empty = synthetic reference patterns only)
+max_storage_gb = 500                     # storage cap of the pattern store in GiB (segments + index)
+segment_mb = 64                          # pattern segment file rotation size (MiB)
+cache_mb = 256                           # decoded pattern LRU cache budget (MiB)
+
 # Moderate Scan: read-only telemetry, gas-limit audit, passive dataflow (50-60% of CPUs).
 [modes.moderate]
 workers = 0                              # worker processes (0 = automatic for the CPU policy)
@@ -72,6 +78,9 @@ agent_bots = 0                           # AI-generated competitor bots per gene
 agent_generations = 2                    # AI factory generations (synthesise, deploy, retrain)
 agent_heat_size = 8                      # AI bots per arena heat (one worker task)
 agent_heat_slots = 12                    # blocks each AI arena heat simulates
+pattern_seed_bps = 0                     # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
+pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
+pattern_synthetic = 0                    # generated reference patterns used when no pattern store is set
 
 # Brutal Aggressive Simulation: multi-block sandwich search on the capped pool (50-60% of CPUs).
 [modes.brutal]
@@ -96,6 +105,9 @@ agent_bots = 0                           # AI-generated competitor bots per gene
 agent_generations = 2                    # AI factory generations (synthesise, deploy, retrain)
 agent_heat_size = 8                      # AI bots per arena heat (one worker task)
 agent_heat_slots = 12                    # blocks each AI arena heat simulates
+pattern_seed_bps = 0                     # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
+pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
+pattern_synthetic = 0                    # generated reference patterns used when no pattern store is set
 
 # MAX Brutal Simulation: no CPU cap (100% of logical CPUs), dense shards, policy-gradient path fuzz, AI agent factory.
 [modes.max]
@@ -120,3 +132,6 @@ agent_bots = 512                         # AI-generated competitor bots per gene
 agent_generations = 6                    # AI factory generations (synthesise, deploy, retrain)
 agent_heat_size = 8                      # AI bots per arena heat (one worker task)
 agent_heat_slots = 16                    # blocks each AI arena heat simulates
+pattern_seed_bps = 5000                  # share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)
+pattern_limit = 4096                     # heaviest MEV patterns loaded into the AI factory
+pattern_synthetic = 3072                 # generated reference patterns used when no pattern store is set

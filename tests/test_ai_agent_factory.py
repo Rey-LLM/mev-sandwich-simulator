@@ -1156,7 +1156,8 @@ def _small(mode, **kw):
     base = dict(blocks=1, txs_per_block=6, frontrun_grid=4, refine_iterations=2, fuzz_iterations=8,
                 layout_fuzz_iterations=4, rl_rounds=1, rl_steps_per_shard=4, rl_eval_steps=6, pg_paths=8,
                 pg_path_steps=2, pg_batch=4, shard_density=1, private_flow_bps=0, agent_bots=8,
-                agent_generations=2, agent_heat_size=4, agent_heat_slots=2)
+                agent_generations=2, agent_heat_size=4, agent_heat_slots=2, pattern_synthetic=64,
+                pattern_limit=48)
     base.update(kw)
     return SimulationConfig.for_mode(mode, **base)
 

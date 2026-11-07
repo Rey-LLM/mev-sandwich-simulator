@@ -1,4 +1,4 @@
-"""Layers 09 / 10 / 11: ``sandwich.toml`` settings sync engine.
+"""Layers 09 / 10 / 11 / 12: ``sandwich.toml`` settings sync engine.
 
 The central settings file
 -------------------------
@@ -15,6 +15,7 @@ simulator in one place::
     [rl]              regime
     [trace]           enabled, path
     [audit]           enabled, fail_on, code_scan, tick_samples
+    [patterns]        store, max_storage_gb, segment_mb, cache_mb
     [modes.moderate]  \
     [modes.brutal]     > the three run matrices (config.PRESETS) plus workers
     [modes.max]       /  (0 = automatic under the mode's CPU policy) and cpu_policy
@@ -82,6 +83,9 @@ from .config import (
     AUDIT_LEVELS,
     MAX_AGENT_BOTS,
     MAX_AGENT_GENERATIONS,
+    MAX_PATTERN_LIMIT,
+    MAX_PATTERN_STORAGE_GB,
+    MAX_PATTERN_SYNTHETIC,
     MAX_PG_PATHS,
     MAX_SHARD_DENSITY,
     MODE_KEYS,
@@ -331,6 +335,15 @@ SETTINGS: Tuple[Setting, ...] = (
     _s("audit_code_scan", "audit", "code_scan", bool, ["--code-scan"], "include the source code scan"),
     _s("audit_tick_samples", "audit", "tick_samples", int, ["--audit-tick-samples"],
        "ticks sampled by the tick-arithmetic checks", minimum=0, maximum=100_000),
+    # [patterns]
+    _s("pattern_store", "patterns", "store", str, ["--pattern-store"],
+       "MEV pattern store directory (empty = synthetic reference patterns only)"),
+    _s("pattern_max_storage_gb", "patterns", "max_storage_gb", int, ["--pattern-max-gb"],
+       "storage cap of the pattern store in GiB (segments + index)", minimum=1, maximum=MAX_PATTERN_STORAGE_GB),
+    _s("pattern_segment_mb", "patterns", "segment_mb", int, ["--pattern-segment-mb"],
+       "pattern segment file rotation size (MiB)", minimum=1, maximum=4_096),
+    _s("pattern_cache_mb", "patterns", "cache_mb", int, ["--pattern-cache-mb"],
+       "decoded pattern LRU cache budget (MiB)", minimum=0, maximum=1_048_576),
     # [modes.<mode>]: the run matrices
     _s("workers", "modes", "workers", int, ["--workers"], "worker processes (0 = automatic for the CPU policy)",
        minimum=0, zero_means="auto"),
@@ -369,13 +382,20 @@ SETTINGS: Tuple[Setting, ...] = (
        "AI bots per arena heat (one worker task)", minimum=1),
     _s("agent_heat_slots", "modes", "agent_heat_slots", int, ["--agent-heat-slots"],
        "blocks each AI arena heat simulates", minimum=1),
+    _s("pattern_seed_bps", "modes", "pattern_seed_bps", int, ["--pattern-seed"],
+       "share of generation-0 AI bots seeded from MEV patterns (bps, 0 = off)", **BPS),
+    _s("pattern_limit", "modes", "pattern_limit", int, ["--pattern-limit"],
+       "heaviest MEV patterns loaded into the AI factory", minimum=0, maximum=MAX_PATTERN_LIMIT),
+    _s("pattern_synthetic", "modes", "pattern_synthetic", int, ["--pattern-synthetic"],
+       "generated reference patterns used when no pattern store is set", minimum=0, maximum=MAX_PATTERN_SYNTHETIC),
 )
 
-COMMON_TABLES: Tuple[str, ...] = ("run", "parallel", "gas", "search", "pbs", "private_relay", "rl", "trace", "audit")
+COMMON_TABLES: Tuple[str, ...] = ("run", "parallel", "gas", "search", "pbs", "private_relay", "rl", "trace", "audit",
+                                  "patterns")
 TABLE_TITLES: Dict[str, str] = {
     "meta": "Meta", "run": "Run", "parallel": "Parallel", "gas": "Gas", "search": "Sandwich search",
     "pbs": "PBS builders", "private_relay": "Private relay", "rl": "Reinforcement learning", "trace": "Trace output",
-    "audit": "Integrity audit", "modes": "Run matrices",
+    "audit": "Integrity audit", "patterns": "MEV pattern store", "modes": "Run matrices",
 }
 BY_ATTR: Dict[str, Setting] = {s.attr: s for s in SETTINGS}
 COMMON_BY_LOCATION: Dict[Location, Setting] = {(s.table, s.key): s for s in SETTINGS if not s.per_mode}
