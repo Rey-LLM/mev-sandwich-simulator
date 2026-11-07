@@ -93,6 +93,7 @@ from .slippage_engine import (
     MIN_TICK,
     Q96,
     V4_MAX_LP_FEE,
+    V4_MAX_PROTOCOL_FEE,
     ConcentratedPool,
     MASEError,
     Pool,
@@ -447,10 +448,11 @@ def check_pool(pool: Pool, col: Collector) -> None:
             col.check(R_CL_ACTIVE, active == pool.liquidity, pid,
                       f"liquidity {pool.liquidity} but nets at or below tick {pool.tick} sum to {active}")
     if isinstance(pool, V4Pool):
-        ok = all(v is None or 0 <= v <= V4_MAX_LP_FEE for v in (pool.hook_fee_pips, pool.protocol_fee_pips))
+        ok = (pool.hook_fee_pips is None or 0 <= pool.hook_fee_pips <= V4_MAX_LP_FEE) \
+            and 0 <= pool.protocol_fee_pips <= V4_MAX_PROTOCOL_FEE
         try:
             eff = pool.effective_fee()
-            ok = ok and 0 <= eff < FEE_PIPS_DENOMINATOR
+            ok = ok and 0 <= eff <= FEE_PIPS_DENOMINATOR
         except MASEError as exc:
             ok, eff = False, str(exc)
         col.check(R_V4_FEE, ok, pid, f"hook={pool.hook_fee_pips} protocol={pool.protocol_fee_pips} effective={eff}")

@@ -50,6 +50,14 @@ four category matrices; exact v2 slippage evaluation; parallel shard scans
 on the worker pool). ``ai_agent_factory`` pre-trains its generator on the
 stored patterns and seeds part of generation 0 from them. NumPy is imported
 only for ``PatternStore.matrix``.
+
+0.13.0 (correctness pass): the v3 swap loop now steps by tick-bitmap word,
+reproduces the SqrtPriceMath overflow branch and keeps net-zero ticks
+initialized, so it matches all 240 v3-core pool-swap scenarios to the wei
+(``tests/test_reference_vectors.py``); mempool nonces, ordering, out-of-gas
+and after-gas sandwich accounting follow the protocol rules; the builder has
+an opt-in ``strict_balances`` funding mode. See README.md for what is
+reference-checked, what is a model and what is experimental.
 """
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"

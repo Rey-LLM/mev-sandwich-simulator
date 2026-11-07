@@ -301,6 +301,7 @@ def clone_pool(pool: Pool) -> Pool:
     twin = copy.copy(pool)
     if isinstance(pool, ConcentratedPool):
         twin.ticks = dict(pool.ticks)
+        twin.tick_gross = dict(pool.tick_gross)
         twin._tick_array = list(pool._tick_array)
     return twin
 
@@ -315,15 +316,34 @@ def _clone_fork(fork: StateFork) -> StateFork:
 
 
 class BuilderState:
+    """Pools, balances, nonces and LP positions for block building.
+
+    Balances: by default (``strict_balances=False``) accounts are treated as
+    funded and balances are signed profit-and-loss ledgers that may go
+    negative; this keeps scenarios short (no funding transactions). With
+    ``strict_balances=True`` the builder applies the protocol's funding rules:
+    a transaction is invalid when the sender cannot pay
+    ``gas_limit * max_fee_per_gas + value`` up front (geth's
+    "insufficient funds for gas * price + value"), a swap or mint that spends
+    more tokens than the sender holds reverts (the ERC-20 ``transferFrom``
+    fails), and a bundle whose searcher cannot pay its coinbase transfer is
+    dropped.
+    """
+
     def __init__(self, fork: StateFork, nonces: Optional[Mapping[str, int]] = None,
-                 positions: Optional[Mapping[PositionKey, int]] = None) -> None:
+                 positions: Optional[Mapping[PositionKey, int]] = None, strict_balances: bool = False) -> None:
         self.fork = fork
         self.nonces: Dict[str, int] = dict(nonces or {})
         self.positions: Dict[PositionKey, int] = dict(positions or {})
+        self.strict_balances = strict_balances
 
     @classmethod
-    def from_pools(cls, pools: Iterable[Pool], block_number: int = 0) -> "BuilderState":
-        return cls(StateFork([clone_pool(p) for p in pools], block_number=block_number))
+    def from_pools(cls, pools: Iterable[Pool], block_number: int = 0,
+                   balances: Optional[Mapping[str, Mapping[str, int]]] = None,
+                   strict_balances: bool = False) -> "BuilderState":
+        fork = StateFork([clone_pool(p) for p in pools], block_number=block_number,
+                         balances={a: dict(t) for a, t in (balances or {}).items()})
+        return cls(fork, strict_balances=strict_balances)
 
     @property
     def pools(self) -> Dict[str, Pool]:
@@ -337,7 +357,7 @@ class BuilderState:
         return self.nonces.get(account, 0)
 
     def copy(self) -> "BuilderState":
-        return BuilderState(_clone_fork(self.fork), self.nonces, self.positions)
+        return BuilderState(_clone_fork(self.fork), self.nonces, self.positions, self.strict_balances)
 
     def snapshot(self) -> Tuple[Any, ...]:
         """Cheap in-memory snapshot for atomic bundle execution."""
@@ -356,13 +376,15 @@ class BuilderState:
     def to_payload(self) -> Tuple[Any, ...]:
         """Picklable form (StateFork's nested defaultdicts are not)."""
         balances = {a: {t: v for t, v in toks.items() if v} for a, toks in self.fork.balances.items()}
-        return (self.fork.pools, balances, self.fork.block_number, dict(self.nonces), dict(self.positions))
+        return (self.fork.pools, balances, self.fork.block_number, dict(self.nonces), dict(self.positions),
+                self.strict_balances)
 
     @classmethod
     def from_payload(cls, payload: Tuple[Any, ...]) -> "BuilderState":
-        pools, balances, block_number, nonces, positions = payload
+        pools, balances, block_number, nonces, positions = payload[:5]
+        strict = bool(payload[5]) if len(payload) > 5 else False
         fork = StateFork([clone_pool(p) for p in pools.values()], block_number=block_number, balances=balances)
-        return cls(fork, nonces, positions)
+        return cls(fork, nonces, positions, strict)
 
     def state_root(self) -> str:
         h = hashlib.sha256(self.fork.state_root().encode())
@@ -407,12 +429,18 @@ def modify_liquidity(pool: Pool, tick_lower: int, tick_upper: int, delta: int) -
     new_active = pool.liquidity + delta if in_range else pool.liquidity
     if new_active < 0:
         raise SwapReverted("removing more liquidity than is active")
+    for tick in (tick_lower, tick_upper):
+        if pool.tick_gross.get(tick, 0) + delta < 0:
+            raise SwapReverted("removing more liquidity than the tick holds")
     for tick, d in ((tick_lower, delta), (tick_upper, -delta)):
-        net = pool.ticks.get(tick, 0) + d
-        if net:
-            pool.ticks[tick] = net
+        gross = pool.tick_gross.get(tick, 0) + delta
+        if gross:
+            # Tick.update: the tick stays initialized while liquidityGross > 0, even with net 0.
+            pool.ticks[tick] = pool.ticks.get(tick, 0) + d
+            pool.tick_gross[tick] = gross
         else:
             pool.ticks.pop(tick, None)
+            pool.tick_gross.pop(tick, None)
     pool._tick_array = sorted(pool.ticks)
     pool.liquidity = new_active
     sign = 1 if adding else -1
@@ -546,6 +574,10 @@ def _required_gas(state: BuilderState, tx: BuilderTx) -> Tuple[int, Optional[str
     out = hops[-1][3].amount_out
     if out < tx.amount_out_min:
         return gas, f"amount_out {out} below min {tx.amount_out_min}", hops
+    if state.strict_balances:
+        held = state.fork.balance(tx.sender, tx.token_in)
+        if held < tx.amount_in:
+            return gas, f"transfer amount {tx.amount_in} exceeds balance {held}", hops
     return gas, None, hops
 
 
@@ -569,6 +601,8 @@ def _apply_body(state: BuilderState, tx: BuilderTx, hops: Sequence[Hop]) -> None
         return
     if tx.kind is TxKind.TRANSFER:
         value = int(tx.payload.get("value", 0))
+        if state.strict_balances and value > bal[tx.sender][ETH]:
+            raise SwapReverted(f"transfer value {value} exceeds balance")
         bal[tx.sender][ETH] -= value
         bal[str(tx.payload.get("to", BURN))][ETH] += value
         return
@@ -591,8 +625,12 @@ def _apply_body(state: BuilderState, tx: BuilderTx, hops: Sequence[Hop]) -> None
         delta = -liq
     else:
         delta = liq
-    a0, a1 = modify_liquidity(pool, lower, upper, delta)  # validates before mutating
     t0, t1 = pool.tokens()
+    if state.strict_balances and delta > 0:
+        need0, need1 = modify_liquidity(clone_pool(pool), lower, upper, delta)
+        if need0 > bal[tx.sender][t0] or need1 > bal[tx.sender][t1]:
+            raise SwapReverted("mint needs more tokens than the sender holds")
+    a0, a1 = modify_liquidity(pool, lower, upper, delta)  # validates before mutating
     bal[tx.sender][t0] -= a0
     bal[tx.sender][t1] -= a1
     remaining = state.positions.get(key, 0) + delta
@@ -630,6 +668,11 @@ def execute_tx(state: BuilderState, tx: BuilderTx, base_fee: int, gas_remaining:
     if tx.nonce != expected:
         out.error = "nonce_too_low" if tx.nonce < expected else "nonce_gap"
         return out
+    if state.strict_balances:
+        value = int(tx.payload.get("value", 0)) if tx.kind is TxKind.TRANSFER else 0
+        if state.fork.balance(tx.sender, ETH) < tx.gas_limit * tx.max_fee_per_gas + value:
+            out.error = "insufficient_funds"
+            return out
 
     touched_pools: List[str] = list(tx.route) if tx.kind is TxKind.SWAP else [str(tx.payload.get("pool_id", ""))]
     accounts = [tx.sender, coinbase, BURN]
@@ -709,6 +752,11 @@ def execute_bundle(state: BuilderState, bundle: Bundle, base_fee: int, gas_remai
         res.traces.append(t)
     if bundle.coinbase_transfer_wei:
         payer = bundle.searcher or bundle.txs[-1].sender
+        if state.strict_balances and state.fork.balance(payer, ETH) < bundle.coinbase_transfer_wei:
+            state.restore(snap)
+            res.reason = "coinbase_transfer_exceeds_balance"
+            res.traces = []
+            return res
         rec = _Recorder(state, (), [payer, coinbase]) if trace else None
         state.fork.balances[payer][ETH] -= bundle.coinbase_transfer_wei
         state.fork.balances[coinbase][ETH] += bundle.coinbase_transfer_wei
@@ -956,9 +1004,10 @@ class TxPool:
             return AddResult("rejected_nonce_too_low")
         existing = self.by_sender.get(tx.sender, {}).get(tx.nonce)
         if existing is not None:
+            # geth legacypool: threshold = old * (100 + priceBump) / 100 (integer division) for both fields.
             bump = 100 + REPLACEMENT_BUMP_PCT
-            if (tx.max_fee_per_gas * 100 < existing.max_fee_per_gas * bump
-                    or tx.max_priority_fee_per_gas * 100 < existing.max_priority_fee_per_gas * bump):
+            if (tx.max_fee_per_gas < existing.max_fee_per_gas * bump // 100
+                    or tx.max_priority_fee_per_gas < existing.max_priority_fee_per_gas * bump // 100):
                 return AddResult("rejected_replacement_underpriced")
             self._remove(existing)
             self._insert(tx)

@@ -18,11 +18,26 @@ Integer-exact AMM math for slippage analysis inside the offline simulator:
 All quoting functions are pure: pool objects are never mutated unless
 ``apply_swap`` is called explicitly.
 
-Python integers are unbounded, so uint256 overflow branches from the Solidity
-sources are not reproduced. The v3/v4 swap loop walks a sorted tick array
-instead of the on-chain tick bitmap, so a swap that the contracts would split
-at an uninitialized word boundary is computed as one step here; results can
-differ from chain by rounding dust (a few wei) in that case.
+Bit-exactness: the v3 swap path reproduces the Solidity contracts exactly,
+including the places where Python's unbounded integers would otherwise diverge:
+
+* ``SqrtPriceMath.getNextSqrtPriceFromAmount0RoundingUp`` falls back to
+  ``divRoundingUp(numerator1, numerator1 / sqrtP + amount)`` when
+  ``amount * sqrtP`` overflows uint256, exactly as the contract does.
+* The swap loop steps through ``TickBitmap.nextInitializedTickWithinOneWord``
+  word boundaries (256 compressed ticks per word), so a swap is split into the
+  same steps, with the same rounding, as on chain.
+* Ticks with zero net liquidity but non-zero gross liquidity stay initialized.
+* ``feeGrowthGlobalX128`` is accumulated per step (uint256 wraparound).
+
+``tests/test_reference_vectors.py`` replays all 240 swap scenarios from the
+Uniswap v3-core ``UniswapV3Pool.swaps.spec.ts`` snapshot and requires exact
+equality of amounts, final tick and fee growth, plus the TickMath, SqrtPriceMath
+and SwapMath vectors from the v3-core unit tests.
+
+Not modelled: protocol fees on v3 (``feeProtocol`` is assumed 0), oracle
+observations, liquidity minting/burning after construction, and v4 hooks other
+than a dynamic LP fee.
 """
 
 from __future__ import annotations
@@ -50,7 +65,8 @@ MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
 FEE_PIPS_DENOMINATOR = 1_000_000  # v3 / v4 fees are in hundredths of a bip
 BPS_DENOMINATOR = 10_000
 V2_FEE_BPS = 30  # Uniswap v2: 0.3%, i.e. the 997/1000 factor
-V4_MAX_LP_FEE = 1_000_000
+V4_MAX_LP_FEE = 1_000_000  # LPFeeLibrary.MAX_LP_FEE
+V4_MAX_PROTOCOL_FEE = 1_000  # ProtocolFeeLibrary.MAX_PROTOCOL_FEE (0.1%, per direction)
 
 
 class MASEError(ValueError):
@@ -106,6 +122,29 @@ def v2_get_amount_in(amount_out: int, reserve_in: int, reserve_out: int, fee_bps
     numerator = reserve_in * amount_out * BPS_DENOMINATOR
     denominator = (reserve_out - amount_out) * (BPS_DENOMINATOR - fee_bps)
     return numerator // denominator + 1
+
+
+def v2_swap_satisfies_k(reserve0: int, reserve1: int, amount0_in: int, amount1_in: int,
+                        amount0_out: int, amount1_out: int, fee_bps: int = V2_FEE_BPS) -> bool:
+    """The invariant check at the end of ``UniswapV2Pair.swap``.
+
+    ``balanceXAdjusted = balanceX * 1000 - amountXIn * 3`` and the pair
+    requires ``balance0Adjusted * balance1Adjusted >= reserve0 * reserve1 * 1000**2``
+    (written here in bps, which is the same inequality scaled by 10**2).
+    Also enforces the pair's ``INSUFFICIENT_OUTPUT_AMOUNT``,
+    ``INSUFFICIENT_LIQUIDITY`` and ``INSUFFICIENT_INPUT_AMOUNT`` requires.
+    """
+    if amount0_out <= 0 and amount1_out <= 0:
+        return False
+    if amount0_out >= reserve0 or amount1_out >= reserve1:
+        return False
+    if amount0_in <= 0 and amount1_in <= 0:
+        return False
+    balance0 = reserve0 + amount0_in - amount0_out
+    balance1 = reserve1 + amount1_in - amount1_out
+    adj0 = balance0 * BPS_DENOMINATOR - amount0_in * fee_bps
+    adj1 = balance1 * BPS_DENOMINATOR - amount1_in * fee_bps
+    return adj0 * adj1 >= reserve0 * reserve1 * BPS_DENOMINATOR ** 2
 
 
 @dataclass
@@ -255,21 +294,36 @@ def price_to_sqrt_price_x96(price: Union[Fraction, int, float]) -> int:
 # ---------------------------------------------------------------------------
 
 
+UINT160_MAX = (1 << 160) - 1
+
+
+def _to_uint160(value: int) -> int:
+    if not 0 <= value <= UINT160_MAX:
+        raise MASEError("sqrt price does not fit in uint160")
+    return value
+
+
 def get_next_sqrt_price_from_amount0_rounding_up(sqrt_p: int, liquidity: int, amount: int, add: bool) -> int:
+    """SqrtPriceMath.getNextSqrtPriceFromAmount0RoundingUp, including its overflow branch."""
     if amount == 0:
         return sqrt_p
     numerator1 = liquidity << 96
     product = amount * sqrt_p
     if add:
-        return mul_div_rounding_up(numerator1, sqrt_p, numerator1 + product)
-    if numerator1 <= product:
+        # Solidity: `if ((product = amount * sqrtPX96) / amount == sqrtPX96)` i.e. no
+        # uint256 overflow, and `denominator >= numerator1` i.e. the add did not wrap.
+        if product <= UINT256_MAX and numerator1 + product <= UINT256_MAX:
+            return _to_uint160(mul_div_rounding_up(numerator1, sqrt_p, numerator1 + product))
+        return _to_uint160(div_rounding_up(numerator1, numerator1 // sqrt_p + amount))
+    if product > UINT256_MAX or numerator1 <= product:
         raise MASEError("amount0 output exceeds virtual reserves")
-    return mul_div_rounding_up(numerator1, sqrt_p, numerator1 - product)
+    return _to_uint160(mul_div_rounding_up(numerator1, sqrt_p, numerator1 - product))
 
 
 def get_next_sqrt_price_from_amount1_rounding_down(sqrt_p: int, liquidity: int, amount: int, add: bool) -> int:
+    """SqrtPriceMath.getNextSqrtPriceFromAmount1RoundingDown (both Solidity branches agree)."""
     if add:
-        return sqrt_p + (amount << 96) // liquidity
+        return _to_uint160(sqrt_p + (amount << 96) // liquidity)
     quotient = div_rounding_up(amount << 96, liquidity)
     if sqrt_p <= quotient:
         raise MASEError("amount1 output exceeds virtual reserves")
@@ -331,6 +385,10 @@ def compute_swap_step(
     """
     zero_for_one = sqrt_current >= sqrt_target
     exact_in = amount_remaining >= 0
+    if not 0 <= fee_pips <= FEE_PIPS_DENOMINATOR:
+        raise MASEError("fee out of range")
+    if not exact_in and fee_pips == FEE_PIPS_DENOMINATOR:
+        raise MASEError("a 100% fee cannot be used for exact output")
     amount_in = amount_out = 0
 
     if exact_in:
@@ -372,6 +430,9 @@ def compute_swap_step(
 
     if exact_in and sqrt_next != sqrt_target:
         fee_amount = amount_remaining - amount_in
+    elif fee_pips == FEE_PIPS_DENOMINATOR:
+        # v4 SwapMath: a 100% fee takes the whole input (exact output is rejected below).
+        fee_amount = amount_in
     else:
         fee_amount = mul_div_rounding_up(amount_in, fee_pips, FEE_PIPS_DENOMINATOR - fee_pips)
 
@@ -407,6 +468,10 @@ class ConcentratedPool:
     ticks: Dict[int, int] = field(default_factory=dict)
     pool_id: str = ""
     version: str = "v3"
+    # tick -> liquidityGross. A tick stays initialized while its gross
+    # liquidity is positive, even if its net liquidity is 0. Defaults to
+    # abs(liquidityNet) (or 1 for an explicit net-0 entry) when not given.
+    tick_gross: Dict[int, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not MIN_SQRT_RATIO <= self.sqrt_price_x96 < MAX_SQRT_RATIO:
@@ -417,7 +482,13 @@ class ConcentratedPool:
             raise MASEError("fee out of range")
         if self.tick_spacing <= 0:
             raise MASEError("tick spacing must be positive")
-        self.ticks = {t: n for t, n in self.ticks.items() if n != 0}
+        for t in self.ticks:
+            if t < MIN_TICK or t > MAX_TICK or t % self.tick_spacing:
+                raise MASEError(f"tick {t} is out of range or not a multiple of tick_spacing")
+        # Every key is an initialized tick (liquidityGross > 0), even when its
+        # liquidityNet is 0: the contracts still stop a swap step there.
+        self.ticks = dict(self.ticks)
+        self.tick_gross = {t: self.tick_gross.get(t) or abs(n) or 1 for t, n in self.ticks.items()}
         self._tick_array: List[int] = sorted(self.ticks)
         self.tick = get_tick_at_sqrt_ratio(self.sqrt_price_x96)
         if not self.pool_id:
@@ -437,6 +508,7 @@ class ConcentratedPool:
         **kwargs: Any,
     ) -> "ConcentratedPool":
         ticks: Dict[int, int] = {}
+        gross: Dict[int, int] = {}
         current_tick = get_tick_at_sqrt_ratio(sqrt_price_x96)
         active = 0
         for pos in positions:
@@ -450,6 +522,8 @@ class ConcentratedPool:
                 raise MASEError("position liquidity must be positive")
             ticks[pos.tick_lower] = ticks.get(pos.tick_lower, 0) + pos.liquidity
             ticks[pos.tick_upper] = ticks.get(pos.tick_upper, 0) - pos.liquidity
+            gross[pos.tick_lower] = gross.get(pos.tick_lower, 0) + pos.liquidity
+            gross[pos.tick_upper] = gross.get(pos.tick_upper, 0) + pos.liquidity
             if pos.tick_lower <= current_tick < pos.tick_upper:
                 active += pos.liquidity
         return cls(
@@ -460,6 +534,7 @@ class ConcentratedPool:
             fee_pips=fee_pips,
             tick_spacing=tick_spacing,
             ticks=ticks,
+            tick_gross=gross,
             **kwargs,
         )
 
@@ -480,12 +555,28 @@ class ConcentratedPool:
         return p if zero_for_one else 1 / p
 
     def _next_initialized_tick(self, tick: int, zero_for_one: bool) -> Tuple[int, bool]:
+        """TickBitmap.nextInitializedTickWithinOneWord over the sorted tick array.
+
+        Searches only the 256-tick bitmap word that holds the current
+        compressed tick; when the word has no initialized tick it returns the
+        word boundary with ``initialized=False``, which is where the contract
+        ends the swap step.
+        """
         arr = self._tick_array
+        spacing = self.tick_spacing
+        compressed = tick // spacing  # floor, same as the Solidity round-toward-negative-infinity
         if zero_for_one:
-            i = bisect_right(arr, tick) - 1
-            return (arr[i], True) if i >= 0 else (MIN_TICK, False)
-        i = bisect_right(arr, tick)
-        return (arr[i], True) if i < len(arr) else (MAX_TICK, False)
+            word_start = (compressed >> 8) << 8
+            i = bisect_right(arr, compressed * spacing) - 1
+            if i >= 0 and arr[i] >= word_start * spacing:
+                return arr[i], True
+            return word_start * spacing, False
+        nxt = compressed + 1
+        word_end = ((nxt >> 8) << 8) + 255
+        i = bisect_left(arr, nxt * spacing)
+        if i < len(arr) and arr[i] <= word_end * spacing:
+            return arr[i], True
+        return word_end * spacing, False
 
     # -- swap ---------------------------------------------------------------
 
@@ -514,6 +605,7 @@ class ConcentratedPool:
         tick = self.tick
         liquidity = self.liquidity
         total_in = total_out = total_fee = 0
+        fee_growth_delta = 0
         crossed = 0
         price_before = self.spot_price(zero_for_one)
 
@@ -537,6 +629,8 @@ class ConcentratedPool:
             total_in += step_in + step_fee
             total_out += step_out
             total_fee += step_fee
+            if liquidity > 0:
+                fee_growth_delta = (fee_growth_delta + mul_div(step_fee, Q128, liquidity)) & UINT256_MAX
 
             if sqrt_p == sqrt_next_tick:
                 if initialized:
@@ -560,6 +654,8 @@ class ConcentratedPool:
             ticks_crossed=crossed,
             sqrt_price_after_x96=sqrt_p,
             tick_after=tick,
+            liquidity_after=liquidity,
+            fee_growth_global_x128_delta=fee_growth_delta,
         )
         return result, sqrt_p, tick, liquidity
 
@@ -589,8 +685,12 @@ class V4Pool(ConcentratedPool):
 
     ``dynamic_fee`` mirrors the 0x800000 flag; when set, ``hook_fee_pips``
     (or a ``fee_override_pips`` field on the payload) replaces the static fee.
-    ``protocol_fee_pips`` is applied before the LP fee as in v4's
-    ProtocolFeeLibrary.calculateSwapFee.
+    ``protocol_fee_pips`` (at most 1000, i.e. 0.1%) is combined with the LP
+    fee as in v4's ``ProtocolFeeLibrary.calculateSwapFee``. One value is used
+    for both directions (on chain the protocol fee is two 12-bit halves).
+
+    A swap fee of exactly 100% is accepted for exact input (the whole input is
+    taken as fee) and rejected for exact output, as in v4 ``Pool.swap``.
     """
 
     dynamic_fee: bool = False
@@ -600,9 +700,10 @@ class V4Pool(ConcentratedPool):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        for value in (self.hook_fee_pips, self.protocol_fee_pips):
-            if value is not None and not 0 <= value <= V4_MAX_LP_FEE:
-                raise MASEError("v4 fee out of range")
+        if self.hook_fee_pips is not None and not 0 <= self.hook_fee_pips <= V4_MAX_LP_FEE:
+            raise MASEError("v4 fee out of range")
+        if not 0 <= self.protocol_fee_pips <= V4_MAX_PROTOCOL_FEE:
+            raise MASEError("v4 protocol fee out of range")
 
     def effective_fee(self, payload: Optional[Mapping[str, Any]] = None) -> int:
         lp_fee = self.fee_pips
@@ -616,8 +717,7 @@ class V4Pool(ConcentratedPool):
             raise MASEError("v4 lp fee out of range")
         pf = self.protocol_fee_pips
         # protocolFee + lpFee - protocolFee * lpFee / 1e6
-        total = pf + lp_fee - (pf * lp_fee) // FEE_PIPS_DENOMINATOR
-        return min(total, FEE_PIPS_DENOMINATOR - 1)
+        return pf + lp_fee - (pf * lp_fee) // FEE_PIPS_DENOMINATOR
 
     def quote_exact_in(self, amount_in: int, zero_for_one: bool, sqrt_price_limit_x96: Optional[int] = None,
                        fee_pips: Optional[int] = None) -> "SwapResult":
@@ -654,6 +754,9 @@ class SwapResult:
     ticks_crossed: int
     sqrt_price_after_x96: Optional[int] = None
     tick_after: Optional[int] = None
+    liquidity_after: Optional[int] = None
+    # Increase of feeGrowthGlobal{0,1}X128 for the input token (v3 pools only).
+    fee_growth_global_x128_delta: Optional[int] = None
 
     @property
     def execution_price(self) -> Fraction:
@@ -1042,6 +1145,7 @@ __all__ = [
     "MASEEngine",
     "v2_get_amount_out",
     "v2_get_amount_in",
+    "v2_swap_satisfies_k",
     "get_sqrt_ratio_at_tick",
     "get_tick_at_sqrt_ratio",
     "sqrt_price_x96_to_price",

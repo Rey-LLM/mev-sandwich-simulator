@@ -1,5 +1,8 @@
 """Layer 09: high-density policy-gradient path fuzzer (MAX Brutal Simulation).
 
+Status: experimental. A stress / throughput harness for the RL policy; its results
+are about the simulator, not about real searcher behaviour.
+
 A *path* is one REINFORCE trajectory: a
 :class:`~simulator.reinforcement_engine.PolicyGradientAgent` starts from a
 shared base table and walks a seeded environment for ``steps`` steps,

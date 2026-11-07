@@ -16,12 +16,26 @@ Parallel stages use one capped :class:`WorkerPool` per run. Task layout never
 depends on the worker count, so parallel and serial runs give identical
 results.
 
+Execution rules in ``run_blocks`` (a simplified block model; the full EIP-1559
+/ PBS model lives in ``block_builder``):
+
+* Every sender has an account nonce that persists across blocks. Generated
+  transactions carry consecutive per-sender nonces and blocks are ordered by
+  priority fee while keeping each sender's nonces in order.
+* A transaction whose ``gas_limit`` is below the estimated gas it needs runs
+  out of gas: its swap has no effect, but it is included and uses its nonce.
+* A sandwich is executed only if it still pays after gas. Gas is priced at the
+  flat ``gas_price_wei`` and converted to the profit token at the spot price
+  of a direct pool against the native token; when no such pool exists the
+  net profit cannot be priced and the sandwich must at least be gross-positive.
+
 Gas figures are heuristic per-hop estimates for auditing, not EVM-measured.
 """
 
 from __future__ import annotations
 
 import copy
+import heapq
 import math
 import random
 from dataclasses import dataclass, field
@@ -103,22 +117,46 @@ def estimate_swap_gas(pools: Sequence[Pool], ticks_crossed: int = 0) -> int:
 
 
 def block_order(txs: Iterable[PendingTx]) -> List[PendingTx]:
-    """Highest priority fee first; hash breaks ties deterministically."""
-    return sorted(txs, key=lambda t: (-t.priority_fee_wei, t.tx_hash))
+    """Highest priority fee first, but each sender's transactions stay in nonce order.
+
+    Like geth's ``TransactionsByPriceAndNonce``: only the lowest-nonce pending
+    transaction of every sender competes on price; when it is taken, that
+    sender's next nonce becomes its head. The hash breaks ties
+    deterministically. A sender's transactions after a nonce gap are dropped.
+    """
+    per_sender: Dict[str, List[PendingTx]] = {}
+    for tx in txs:
+        per_sender.setdefault(tx.sender, []).append(tx)
+    heap: List[Tuple[int, str, str, int]] = []
+    for sender, lst in per_sender.items():
+        lst.sort(key=lambda t: (t.nonce, t.tx_hash))
+        heapq.heappush(heap, (-lst[0].priority_fee_wei, lst[0].tx_hash, sender, 0))
+    out: List[PendingTx] = []
+    while heap:
+        _, _, sender, i = heapq.heappop(heap)
+        lst = per_sender[sender]
+        out.append(lst[i])
+        if i + 1 < len(lst) and lst[i + 1].nonce == lst[i].nonce + 1:
+            heapq.heappush(heap, (-lst[i + 1].priority_fee_wei, lst[i + 1].tx_hash, sender, i + 1))
+    return out
 
 
-def generate_mempool(pools: Iterable[Pool], count: int, seed: int, block: int = 0) -> List[PendingTx]:
+def generate_mempool(pools: Iterable[Pool], count: int, seed: int, block: int = 0,
+                     nonces: Optional[Dict[str, int]] = None) -> List[PendingTx]:
     """Deterministic single-hop swaps sized 0.01%-3% of the input-side reserve.
 
     ``amount_out_min`` is set from a quote on the given state at a random
     slippage tolerance (10-1000 bps), the way a wallet would. Gas limits are
     drawn around the estimate, so some are deliberately under-provisioned.
+    Each sender's transactions get consecutive nonces starting at its account
+    nonce in ``nonces`` (0 when absent).
     """
     pools = sorted(pools, key=lambda p: p.pool_id)
     if not pools:
         return []
     rng = random.Random(f"mempool:{seed}:{block}")
     txs: List[PendingTx] = []
+    next_nonce: Dict[str, int] = dict(nonces or {})
     for i in range(count):
         pool = pools[rng.randrange(len(pools))]
         token_in = pool.tokens()[rng.randrange(2)]
@@ -133,9 +171,13 @@ def generate_mempool(pools: Iterable[Pool], count: int, seed: int, block: int = 
             continue
         gas_est = estimate_swap_gas([pool], quote.ticks_crossed)
         gas_limit = int(gas_est * rng.choice((0.8, 1.1, 1.25, 1.5)))
+        tx_hash = f"0x{block:06x}{i:06x}{rng.getrandbits(96):024x}"
+        sender = f"trader{rng.randrange(1_000):03d}"
+        nonce = next_nonce.get(sender, 0)
+        next_nonce[sender] = nonce + 1
         txs.append(PendingTx(
-            tx_hash=f"0x{block:06x}{i:06x}{rng.getrandbits(96):024x}",
-            sender=f"trader{rng.randrange(1_000):03d}",
+            tx_hash=tx_hash,
+            sender=sender,
             payload={
                 "route": [pool.pool_id],
                 "token_in": token_in,
@@ -145,7 +187,7 @@ def generate_mempool(pools: Iterable[Pool], count: int, seed: int, block: int = 
             },
             gas_limit=gas_limit,
             priority_fee_wei=rng.randrange(1, 6) * 10**9,
-            nonce=i,
+            nonce=nonce,
         ))
     return txs
 
@@ -349,6 +391,7 @@ class BlockReport:
     txs: int
     sandwiches: List[Dict[str, Any]] = field(default_factory=list)
     victims_reverted: int = 0
+    out_of_gas: int = 0
     plans_found: int = 0
     plans_rolled_back: int = 0
     gas_spent_wei: int = 0
@@ -365,6 +408,7 @@ class BlockReport:
             "sandwiches_executed": len(self.sandwiches),
             "plans_rolled_back": self.plans_rolled_back,
             "victims_reverted": self.victims_reverted,
+            "out_of_gas": self.out_of_gas,
             "extracted": extracted,
             "gas_spent_wei": self.gas_spent_wei,
             "state_root": self.state_root,
@@ -463,17 +507,25 @@ class MempoolEmulator:
         flow = TokenFlowGraph()
         invariants = InvariantReport()
         blocks: List[BlockReport] = []
+        nonces: Dict[str, int] = {}
         own = executor is None
         wp = self._executor() if own else executor
         try:
             for _ in range(cfg.blocks):
-                txs = generate_mempool(state.pools.values(), cfg.txs_per_block, cfg.seed, state.block_number)
+                txs = generate_mempool(state.pools.values(), cfg.txs_per_block, cfg.seed, state.block_number,
+                                       nonces)
                 plans = self.search(state.pools, txs, wp)
                 report = BlockReport(state.block_number, len(txs), plans_found=len(plans))
                 k_before = {pid: p.k for pid, p in state.pools.items() if isinstance(p, V2Pool)}
                 for tx in block_order(txs):
+                    if tx.nonce != nonces.get(tx.sender, 0):  # pragma: no cover - generator keeps nonces exact
+                        continue
+                    nonces[tx.sender] = tx.nonce + 1  # included: uses its nonce even if it reverts
                     plan = plans.get(tx.tx_hash)
                     if plan is not None and self._execute_sandwich(state, tx, plan, flow, report):
+                        continue
+                    if not _has_enough_gas(state, tx):
+                        report.out_of_gas += 1
                         continue
                     try:
                         state.swap(tx.sender, tx.route[0], tx.token_in, tx.amount_in, tx.amount_out_min,
@@ -504,10 +556,13 @@ class MempoolEmulator:
         """Front-run, victim, back-run inside a checkpoint; keep only if still profitable."""
         cfg = self.config
         legs = TokenFlowGraph()
+        price_pools = {pid: copy.copy(p) for pid, p in state.pools.items()}  # spot prices before the bundle
         with state.checkpoint():
             try:
                 front = state.swap(SEARCHER, plan.pool_id, plan.token_in, plan.frontrun_in,
                                    tx=f"{tx.tx_hash}:front", flow=legs, label="frontrun")
+                if not _has_enough_gas(state, tx):
+                    raise SwapReverted("victim out of gas")
                 state.swap(tx.sender, plan.pool_id, tx.token_in, tx.amount_in, tx.amount_out_min,
                            tx=tx.tx_hash, flow=legs, label="victim")
                 back = state.swap(SEARCHER, plan.pool_id, plan.token_out, front.amount_out,
@@ -516,12 +571,15 @@ class MempoolEmulator:
                 report.plans_rolled_back += 1
                 return False
             profit = back.amount_out - plan.frontrun_in
-            if profit <= 0:
+            pool = state.pools[plan.pool_id]
+            gas_units = estimate_swap_gas([pool], front.ticks_crossed) + estimate_swap_gas([pool], back.ticks_crossed)
+            gas = gas_units * cfg.gas_price_wei
+            gas_in_token = native_to_token(price_pools, plan.token_in, gas, cfg.native_token)
+            net = None if gas_in_token is None else profit - gas_in_token
+            if profit <= 0 or (net is not None and net <= 0):
                 report.plans_rolled_back += 1
                 return False
             state.commit_checkpoint()
-        pool = state.pools[plan.pool_id]
-        gas = 2 * estimate_swap_gas([pool]) * cfg.gas_price_wei
         report.gas_spent_wei += gas
         trace = legs.paths(tx.sender, SEARCHER)
         record = plan.to_dict()
@@ -530,12 +588,42 @@ class MempoolEmulator:
             backrun_out=back.amount_out,
             profit=profit,
             gas_cost_wei=gas,
+            gas_cost_in_token_in=gas_in_token,
+            net_profit=net,
             net_profit_native=profit - gas if plan.token_in == cfg.native_token else None,
             victim_to_searcher_path=[f"{t.src}->{t.dst}:{t.token}" for t in trace[0]] if trace else [],
         )
         report.sandwiches.append(record)
         flow.extend(legs)
         return True
+
+
+def _has_enough_gas(state: StateFork, tx: PendingTx) -> bool:
+    """True when ``tx.gas_limit`` covers the estimated gas of the swap on the current state."""
+    pools = [state.pools[p] for p in tx.route if p in state.pools]
+    ticks = 0
+    try:
+        res, _ = state.quote(tx.route[0], tx.token_in, tx.amount_in)
+        ticks = res.ticks_crossed
+    except (MASEError, SwapReverted):
+        pass  # the swap reverts anyway; the base estimate decides between revert and out-of-gas
+    return tx.gas_limit >= estimate_swap_gas(pools, ticks)
+
+
+def native_to_token(pools: Dict[str, Pool], token: str, amount_native: int, native: str) -> Optional[int]:
+    """``amount_native`` of the native token expressed in ``token`` at the spot price of a direct pool.
+
+    Rounded up (a cost). None when ``token`` has no direct pool against the native token.
+    """
+    if token == native:
+        return amount_native
+    for pid in sorted(pools):
+        pool = pools[pid]
+        if set(pool.tokens()) == {token, native}:
+            zfo, _ = _direction(pool, native)
+            price = pool.spot_price(zfo)  # token per native
+            return -((-amount_native * price.numerator) // price.denominator)
+    return None
 
 
 __all__ = [
@@ -550,6 +638,7 @@ __all__ = [
     "AggressiveReport",
     "MempoolEmulator",
     "estimate_swap_gas",
+    "native_to_token",
     "block_order",
     "generate_mempool",
     "simulate_sandwich",

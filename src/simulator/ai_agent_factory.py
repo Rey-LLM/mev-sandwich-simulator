@@ -1,5 +1,10 @@
 """Layers 11-12: local embedded AI agent factory (machine-generated competitor bots, pattern-seeded).
 
+Status: experimental. The "AI agents" are parameter vectors produced by a small
+NumPy MLP and scored in simulated auctions. Nothing is trained on real
+market data unless a pattern store with real records is configured, and no
+claim is made that the bots resemble real searchers.
+
 The factory scripts, mutates and spins up its own competitor searcher bots at
 runtime, deploys hundreds of them at once against the Layer 08 RL policy on
 the worker pool, and learns from how they did. Nothing leaves the process:

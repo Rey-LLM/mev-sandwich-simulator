@@ -1,5 +1,9 @@
 """Layer 05: private RPC relay (Flashbots Protect / MEV-Share style) emulator.
 
+Status: model. Flashbots Protect / MEV-Share are emulated from their public
+documentation (hint kinds, backrun-only bundles, refunds); hint inference is
+this project's heuristic, and the crypto is simulation-only (see below).
+
 Everything here runs offline on the simulator's pools. The module models the
 path a private transaction takes and how much a searcher can learn from it:
 

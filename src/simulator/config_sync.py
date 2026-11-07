@@ -1698,7 +1698,8 @@ def add_setting_arguments(parser: argparse.ArgumentParser) -> None:
     for s in SETTINGS:
         title = TABLE_TITLES["modes" if s.per_mode else s.table]
         group = groups.setdefault(title, parser.add_argument_group(title))
-        kwargs: Dict[str, Any] = {"dest": s.dest, "default": None, "help": s.help}
+        # argparse %-formats help strings, so a literal "%" in a setting's help must be escaped.
+        kwargs: Dict[str, Any] = {"dest": s.dest, "default": None, "help": s.help.replace("%", "%%")}
         if s.kind is bool:
             kwargs["action"] = argparse.BooleanOptionalAction
         else:

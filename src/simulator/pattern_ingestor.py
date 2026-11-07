@@ -1,5 +1,9 @@
 """Layer 12: MEV pattern ingestion (local pattern store, normalisers, slippage evaluation).
 
+Status: experimental. The normalisers follow the documented field names of the
+source formats but have only been exercised on the built-in synthetic corpus
+(records marked ``source="synthetic"``); no real export ships with the repo.
+
 The ingestor turns MEV attack records from public data exports into one
 normalised, content-addressed :class:`PatternRecord` format and keeps them in
 a local on-disk store that the Layer 11 AI agent factory reads from. Nothing

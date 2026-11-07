@@ -1,5 +1,9 @@
 """Layer 08: online adaptive reinforcement learning for sandwich bidding.
 
+Status: experimental. A toy learning setup inside the simulator: rewards are exact
+for the simulated market, but the market, the rival bots and the state
+discretisation are synthetic, so a learned policy says nothing about mainnet.
+
 An agent learns, while it runs, how large a front-run to place and how much
 of the expected profit to pay the builder, against competing searcher bots
 whose bundles target the same victims. Everything is in memory and uses
