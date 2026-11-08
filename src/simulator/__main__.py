@@ -58,6 +58,18 @@ Layer 15 (code factory, transaction graph, telemetry):
 ``--monitor-html FILE``   record telemetry during a code factory run (``--stress-seconds``
                           adds a MAX Brutal CPU stress) and write an HTML dashboard
 
+Layer 16 (real mainnet data):
+
+``--detect-file FILE``    find sandwiches in a saved block export (receipts + logs, or call
+                          traces; ``.json`` or ``.json.gz``)
+``--detect-block N``      fetch mainnet block N (or ``latest``) over ``--rpc`` / ``$ETH_RPC_URL``
+                          and find sandwiches (``--block-count K`` scans K blocks ending at N,
+                          ``--save-export FILE`` keeps the data for offline reuse)
+``--check-swap FILE``     pre-trade check of a swap described in JSON: sandwichable or not at
+                          ``--slippage-bps``, safe slippage, safe size
+``--check-pool ADDRESS``  the same on a live pool read over ``--rpc`` (``--pool-version``,
+                          ``--token-in``, ``--amount-in``, ``--gas-price-wei``, ``--eth-price``)
+
 Human-facing text (settings comments, the settings editor, the telemetry
 window, HTML pages, factory logs, CLI help and error prefixes) is Russian by
 default; ``--lang en``, ``$MEV_SIM_LANG`` or ``[ui] language`` switch it.
@@ -155,6 +167,20 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--tx-graph", metavar="FILE", help=i18n.t("cli.tx_graph"))
     actions.add_argument("--monitor", action="store_true", help=i18n.t("cli.monitor"))
     actions.add_argument("--monitor-html", metavar="FILE", help=i18n.t("cli.monitor_html"))
+    actions.add_argument("--detect-file", metavar="FILE", help=i18n.t("cli.detect_file"))
+    actions.add_argument("--detect-block", metavar="N", help=i18n.t("cli.detect_block"))
+    actions.add_argument("--check-swap", metavar="FILE", help=i18n.t("cli.check_swap"))
+    actions.add_argument("--check-pool", metavar="ADDRESS", help=i18n.t("cli.check_pool"))
+    l16 = parser.add_argument_group(i18n.t("cli.group.layer16"))
+    l16.add_argument("--rpc", metavar="URL", help=i18n.t("cli.rpc"))
+    l16.add_argument("--block-count", type=int, default=1, metavar="K", help=i18n.t("cli.detect_count"))
+    l16.add_argument("--save-export", metavar="FILE", help=i18n.t("cli.save_export"))
+    l16.add_argument("--pool-version", choices=("v2", "v3"), default="v2", help=i18n.t("cli.pool_version"))
+    l16.add_argument("--token-in", metavar="ADDRESS", help=i18n.t("cli.token_in"))
+    l16.add_argument("--amount-in", type=int, metavar="N", help=i18n.t("cli.amount_in"))
+    l16.add_argument("--slippage-bps", type=int, default=50, metavar="BPS", help=i18n.t("cli.slippage_bps"))
+    l16.add_argument("--gas-price-wei", type=int, default=0, metavar="WEI", help=i18n.t("cli.gas_price"))
+    l16.add_argument("--eth-price", metavar="X", help=i18n.t("cli.eth_price"))
     l15 = parser.add_argument_group(i18n.t("cli.group.layer15"))
     l15.add_argument("--bot-dir", metavar="DIR", help=i18n.t("cli.bot_dir"))
     l15.add_argument("--factory-bots", type=int, default=16, metavar="N", help=i18n.t("cli.factory_bots"))
@@ -298,6 +324,8 @@ def _main(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         return _builder_action(args, cfg, out)
     if args.code_factory or args.tx_graph or args.monitor or args.monitor_html:
         return _layer15_action(args, cfg, out)
+    if args.detect_file or args.detect_block or args.check_swap or args.check_pool:
+        return _layer16_action(args, cfg, out)
 
     controller = SimulationController(cfg)
     try:
@@ -436,6 +464,58 @@ def _layer15_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO
     except RuntimeError as exc:
         raise ConfigError(str(exc)) from exc
     return EXIT_OK
+
+
+def _layer16_action(args: argparse.Namespace, cfg: SimulationConfig, out: TextIO) -> int:
+    from fractions import Fraction
+
+    from .sandwich_detector import (DetectorError, JsonRpcClient, detect_block, detect_export, fetch_block_export,
+                                    fetch_v2_pool, fetch_v3_pool, load_export, read_export_file, write_export_file)
+    from .sandwich_guard import assess_swap, pool_from_spec
+    from .slippage_engine import MASEError
+
+    try:
+        if args.detect_file:
+            reports = detect_export(read_export_file(args.detect_file))
+            _dump({"blocks": [r.to_dict() for r in reports]}, out)
+            return EXIT_OK
+        if args.detect_block:
+            if args.block_count < 1:
+                raise ConfigError("--block-count must be >= 1")
+            client = JsonRpcClient(args.rpc)
+            last = client.block_number() if args.detect_block == "latest" else int(args.detect_block, 0)
+            exports = [fetch_block_export(client, n) for n in range(last - args.block_count + 1, last + 1)]
+            if args.save_export:
+                write_export_file(args.save_export, {"blocks": exports})
+            reports = [detect_block(b) for e in exports for b in load_export(e)]
+            _dump({"blocks": [r.to_dict() for r in reports]}, out)
+            return EXIT_OK
+        if args.check_swap:
+            spec = json.loads(Path(args.check_swap).read_text(encoding="utf-8"))
+            pool = pool_from_spec(spec["pool"])
+            token_in, amount_in = str(spec["token_in"]), int(spec["amount_in"])
+            slippage = int(spec.get("slippage_bps", args.slippage_bps))
+            gas_price = int(spec.get("gas_price_wei", args.gas_price_wei))
+            eth_price = spec.get("token_in_per_eth", args.eth_price)
+            attack_gas = spec.get("attack_gas")
+        else:
+            if not args.token_in or not args.amount_in:
+                raise ConfigError("--check-pool needs --token-in and --amount-in")
+            client = JsonRpcClient(args.rpc)
+            fetch = fetch_v3_pool if args.pool_version == "v3" else fetch_v2_pool
+            pool = pool_from_spec(fetch(client, args.check_pool))
+            token_in, amount_in = args.token_in, args.amount_in
+            slippage, gas_price, eth_price, attack_gas = args.slippage_bps, args.gas_price_wei, args.eth_price, None
+        report = assess_swap(pool, token_in, amount_in, slippage_bps=slippage, gas_price_wei=gas_price,
+                             attack_gas=None if attack_gas is None else int(attack_gas),
+                             token_in_per_eth=None if eth_price is None else Fraction(str(eth_price)),
+                             lang=cfg.language)
+        _dump(report.to_dict(), out)
+        return EXIT_OK
+    except (DetectorError, MASEError, KeyError, OSError, ValueError) as exc:
+        if isinstance(exc, ConfigError):
+            raise
+        raise ConfigError(str(exc)) from exc
 
 
 if __name__ == "__main__":

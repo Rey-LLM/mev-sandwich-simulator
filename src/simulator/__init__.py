@@ -81,6 +81,13 @@ and rewrites the files), ``tx_graph`` (versioned BTC / ETH dataflow DAGs with
 exact flows, competition and replacement anomalies, layered layout and an
 interactive HTML view), ``gui`` (telemetry window and HTML dashboard: per-core
 CPU load, synthesis speed, convergence) and ``i18n`` (Russian by default).
+
+Layer 16 (0.17.0): ``sandwich_detector`` (finds sandwiches in real Ethereum
+blocks from receipts / logs or call traces, over JSON-RPC or from a saved
+export: attacker, victims, each victim's counterfactual loss, attacker profit
+after gas and coinbase bribes; checked on mainnet block 12775690) and
+``sandwich_guard`` (pre-trade check: is a swap sandwichable at a given
+slippage, the largest safe slippage and the largest safe size).
 """
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"

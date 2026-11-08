@@ -1,7 +1,7 @@
 [project]
 name = "mev-sandwich-simulator"
-version = "0.16.0"
-description = "Offline MEV sandwich simulator"
+version = "0.17.0"
+description = "Sandwich attack detector for real Ethereum blocks, pre-trade sandwich check and offline MEV simulator"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 

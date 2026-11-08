@@ -1,12 +1,124 @@
 # MEV Sandwich Simulator
 
-An offline, deterministic simulator of sandwich MEV on Uniswap v2, v3 and v4
-pools, written in pure Python with exact integer math.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Uniswap v3: bit-exact](https://img.shields.io/badge/Uniswap%20v3-bit--exact%20(240%2F240%20vectors)-ff007a)](tests/test_reference_vectors.py)
+[![Real mainnet block](https://img.shields.io/badge/detector-checked%20on%20mainnet%20block%2012775690-627eea)](tests/test_sandwich_detector.py)
+[![Dependencies](https://img.shields.io/badge/runtime%20deps-numpy%20only-informational)](pyproject.toml)
 
-It is a **simulator and a teaching/reference tool, not a trading bot.** It
-never connects to a node, never reads a live mempool, never signs or sends a
-transaction, and holds no keys. Every market, mempool and block it works on
-is generated in memory from a seed, so every run is reproducible.
+**Find sandwich attacks in real Ethereum blocks, measure what every victim lost
+to the wei, check a swap before you send it, and simulate the whole MEV
+supply chain offline.** Pure Python, exact integer math, Uniswap v2 / v3 / v4.
+
+* **Sandwich detector for mainnet blocks.** Point it at an RPC node or a saved
+  block export. It reports the attacker (EOA and bot contract), every victim,
+  each victim's loss as a counterfactual "what you would have got without the
+  front-run", and the attacker's gross and net profit after gas and coinbase
+  bribes.
+* **Pre-trade check.** Is my swap sandwichable at the slippage I am about to
+  sign? What slippage is safe? How small must the trade be?
+* **Reference AMM math.** The Uniswap v3 swap loop reproduces all 240 official
+  `v3-core` pool scenarios to the wei. The detector and the checker run on the
+  same verified code.
+* **An offline lab** with a seeded mempool, a PBS / MEV-Boost auction, a
+  Flashbots Protect model, multi-hop routing, JIT liquidity, oracle attacks and
+  strategy search, all deterministic and reproducible.
+
+It is a **measurement and teaching tool, not a trading bot.** It holds no keys
+and never signs or sends a transaction. The detector and the pre-trade check
+only *read* chain data; everything else runs on markets generated in memory
+from a seed.
+
+## Contents
+
+* [Real-block sandwich detector](#real-block-sandwich-detector)
+* [Pre-trade check: is my swap sandwichable?](#pre-trade-check-is-my-swap-sandwichable)
+* [What you can trust, and why](#what-you-can-trust-and-why)
+* [What the simulator does](#what-the-simulator-does)
+* [Quick start](#quick-start)
+* [Layout](#layout)
+
+## Real-block sandwich detector
+
+```bash
+export ETH_RPC_URL=https://your-node.example          # any Ethereum JSON-RPC endpoint
+PYTHONPATH=src python -m simulator --detect-block latest
+PYTHONPATH=src python -m simulator --detect-block 19000000 --block-count 10 --save-export blocks.json.gz
+PYTHONPATH=src python -m simulator --detect-file blocks.json.gz     # offline, from the saved export
+PYTHONPATH=src python -m simulator --detect-file tests/vectors/mainnet_block_12775690_traces.json.gz
+```
+
+The last command runs on a real block that ships with the tests. Block
+12775690 (6 July 2021) holds a sandwich on the ShibaSwap BONE/WETH pair:
+
+| | Transaction | What happened |
+|---|---|---|
+| Front-run | tx 2 `0x91a3ab…17a0` | bot `0x000000000027d2ef…c4d8` buys BONE for 12.1088 WETH |
+| Victim 1 | tx 3 `0x9b40de…5934` | buys exactly 60 BONE, **overpays 0.00258 WETH** |
+| Victim 2 | tx 4 `0xf8e45a…15f9` | 0.3 WETH in, **gets 0.1094 BONE less** (0.00119 WETH) |
+| Victim 3 | tx 5 `0xdf63b2…f00b` | 0.125 WETH in, **gets 0.0456 BONE less** (0.00049 WETH) |
+| Victim 4 | tx 6 `0x1fe35f…4f4f` | 30 WETH in, **gets 10.855 BONE less** (0.11827 WETH) |
+| Back-run | tx 7 `0xc300d1…95a2` | sells the same BONE for 12.1588 WETH |
+
+Attacker: **+0.049991 WETH gross**, minus 0.0317 ETH paid straight to the miner
+(gas price was 1 wei, a Flashbots-era bundle), **+0.018271 ETH net**. Victims
+together: **−0.12253 ETH**, about 39.5 bps each. All four victim losses are
+marked `exact`: the same AMM code, started from the same reserves,
+reproduces each victim's real on-chain output to the wei. The test suite also
+checks the attacker's profit against the raw WETH transfers in the traces and
+recomputes a victim by hand from the `getReserves()` reads in the block.
+
+**How it works.** The detector reads either receipts with logs (`Swap`,
+`Sync`; what any node returns) or call traces (Parity `trace_block`, the
+format `flashbots/mev-inspect-py` uses). Per pool and in block order it looks
+for a front-run A→B, then victims trading A→B from other senders, then a
+back-run B→A from the same EOA or the same bot contract (never a public
+router) that sells 50–110% of what the front-run bought. For each victim it
+replays the pool *without* the front-run:
+
+* **v2:** reserves before the front-run come from `Sync` events or
+  `getReserves()` outputs and are carried through every swap by its exact
+  deltas. The pair's fee is calibrated from its own swaps (0.3% Uniswap, 0.25%
+  and other forks). A victim that fixed its input loses output (`getAmountOut`);
+  a victim that fixed its output overpays input (`getAmountIn`). Swaps in
+  between are replayed in the mode they were sent in.
+* **v3:** a log only gives the price *after* a swap. The price before the
+  front-run is recovered by bisection over the verified v3 swap loop: the
+  start price whose forward run lands exactly on the logged `sqrtPriceX96` and
+  output. If no price reproduces it, the swap crossed a tick, and the loss is
+  either reported as approximate or not reported.
+
+**Limits, stated plainly.** Bribes paid through internal calls are only
+visible in trace data. v3 pools in trace data carry no price, so only
+detection and profit are reported there. Fee-on-transfer tokens break the
+trace-based input amounts (those victims are not marked exact). The matching
+is a heuristic, like every public sandwich classifier: a bot that splits its
+legs across unrelated addresses will not be linked.
+
+## Pre-trade check: is my swap sandwichable?
+
+```bash
+# a swap described in JSON (pool state, token_in, amount_in, slippage_bps, gas_price_wei)
+PYTHONPATH=src python -m simulator --check-swap swap.json
+# or read a live pool over RPC
+PYTHONPATH=src python -m simulator --check-pool 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc \
+    --token-in 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 --amount-in 10000000000000000000 \
+    --slippage-bps 100 --gas-price-wei 20000000000 --lang en
+```
+
+The attacker's best front-run is searched exactly: the largest front-run the
+victim's `amountOutMin` still tolerates is found by bisection, and the profit
+curve below it is scanned and refined. The output says whether the swap is
+sandwichable, the attacker's best net profit and your loss, the **largest
+safe slippage** (attacker profit can only grow with tolerance, so it is a
+bisection over basis points), and when needed the **largest safe trade size**
+at your tolerance. Advice text is Russian by default, `--lang en` for English.
+
+Two rules of thumb that fall out of the math (and are tested):
+
+* A swap that moves the pool by less than twice the pool fee is never
+  sandwichable, at any slippage: the attacker pays the fee twice.
+* Above that threshold, gas is what protects you: with free gas even a 1 bps
+  tolerance pays the attacker (a 6 WETH swap into a 1,000 WETH pool).
 
 ## What you can trust, and why
 
@@ -38,6 +150,10 @@ code that is a model or an experiment. The table says which is which.
 | Code factory: generated `.py` bots, disk deployment, retraining | `code_factory` | **experimental** | arena P&L is exact wei; every file is digest-checked and AST allow-listed before it runs; `.sol` files are parameter records checked by the factory's own validator (no `solc` offline) |
 | ETH transaction graph | `tx_graph` | **exact** for the simulated block | every included tx is replayed on the parent state; edges must match the replayed balance and reserve deltas to the wei and the replayed state root must equal the sealed block's |
 | BTC transaction graph | `tx_graph` | **model** | synthetic seeded UTXO mempool; P2WPKH size estimate, BIP 125 rules 1/3/4 plus fee rate, ancestor-feerate block template; no real Bitcoin data |
+| Sandwich detector: profit, victim loss (v2) | `sandwich_detector` | **exact** | real mainnet block 12775690: attacker profit equals the raw WETH transfers in the traces; every victim's real output is reproduced to the wei before its counterfactual is trusted |
+| Sandwich detector: victim loss (v3, from logs) | `sandwich_detector` | **exact** when a victim stays inside one tick range, else **approximate** | the reconstructed pre-front-run price must reproduce the front-run's logged price and output exactly; synthetic node-format blocks in `tests/test_sandwich_detector.py` |
+| Sandwich matching (who attacked whom) | `sandwich_detector` | **heuristic** | same pool, A→B / A→B / B→A, front and back share an EOA or a non-router contract, back-run sells 50-110% of the front-run |
+| Pre-trade check | `sandwich_guard` | **exact** for the pool state given | brute-force scans in `tests/test_sandwich_guard.py`; safe slippage and safe size are checked at the boundary (safe, safe + 1) |
 | Telemetry window / HTML dashboard | `gui` | tooling | `/proc/stat` deltas per core (load average fallback); charts are plain plans checked in tests |
 
 ### How the v3 math is verified
@@ -240,12 +356,12 @@ PYTHONPATH=src python -m simulator --monitor            # needs tkinter and a di
 
 ## What it does not do
 
-* No live data: no RPC, no mempool subscription, no real blocks, no
-  historical replay.
+* No live data in the simulator itself: no mempool subscription, no
+  historical replay. Only the detector and the pre-trade check read chain
+  data (read-only JSON-RPC calls, or a saved export).
 * No EVM: gas is estimated, not metered; storage, calldata and contract code
   are not executed.
-* No transaction signing, sending or key handling. It cannot be pointed at a
-  chain.
+* No transaction signing, sending or key handling.
 * No LP fee accrual to pre-existing positions (only the attacker's own JIT
   positions track fees), no v3 protocol fee (`feeProtocol` is 0), no
   on-chain TWAP oracle (the lending model's TWAP is a mean of per-block spot prices), no v4 hooks beyond fee overrides.
@@ -265,6 +381,7 @@ pip install -e '.[test]'           # Python 3.10+, numpy is the only runtime dep
 python -m pytest -q                # full suite, includes the reference vectors
 python -m pytest -q tests/test_reference_vectors.py   # only the Uniswap vectors
 
+PYTHONPATH=src python -m simulator --detect-file tests/vectors/mainnet_block_12775690_traces.json.gz
 PYTHONPATH=src python -m simulator --mode moderate     # quick scan, JSON report on stdout
 PYTHONPATH=src python -m simulator --mode brutal       # sandwiches, PBS, relay, router, RL
 PYTHONPATH=src python -m simulator --audit-only        # pre-flight integrity audit only
@@ -310,6 +427,8 @@ src/simulator/
   code_factory.py       writes bots to disk (.py / .sol), deploys them from disk, retrains  [experimental]
   tx_graph.py           BTC / ETH dataflow graphs, anomalies, interactive HTML    [ETH exact, BTC model]
   gui.py, i18n.py       telemetry window / dashboard, Russian and English text
+  sandwich_detector.py  sandwiches in real blocks: logs or traces, RPC client, keccak   [exact v2, heuristic matching]
+  sandwich_guard.py     pre-trade check: sandwichable?, safe slippage, safe size
   generated_bots/       default output of the code factory (git-ignored)
 tests/
   test_reference_vectors.py   Uniswap v2/v3 official vectors (335 test cases)
@@ -320,8 +439,10 @@ tests/
   test_gui_telemetry.py       CPU sampling math, thread-safe series, chart plans, dashboard
   test_i18n.py                catalog completeness, Russian sandwich.toml / editor / CLI
   test_layer15_stress.py      determinism with every core saturated
-  vectors/                    converted v3-core swap snapshot
-tools/convert_v3_swap_snapshot.py
+  test_sandwich_detector.py   real mainnet block, node-format synthetic blocks, negatives, RPC path
+  test_sandwich_guard.py      best attack vs dense scans, safe slippage / size boundaries
+  vectors/                    converted v3-core swap snapshot, mainnet block 12775690 (traces)
+tools/convert_v3_swap_snapshot.py, tools/fetch_mainnet_fixture.py
 ```
 
 ## License and use

@@ -147,6 +147,57 @@ CATALOG: Dict[str, Dict[str, str]] = {
                     "ru": "открыть окно телеметрии (нужен tkinter)"},
     "cli.monitor_html": {"en": "record telemetry while the code factory runs and write an HTML dashboard to FILE",
                          "ru": "записать телеметрию во время работы фабрики кода и сохранить HTML-панель в FILE"},
+    "cli.group.layer16": {"en": "Layer 16: sandwich detector on real blocks and pre-trade check",
+                          "ru": "Слой 16: детектор сэндвичей в реальных блоках и проверка свопа перед отправкой"},
+    "cli.detect_file": {"en": "find sandwiches in a saved block export (receipts+logs or call traces, .json or .json.gz)",
+                        "ru": "найти сэндвичи в сохранённом экспорте блока (квитанции с логами или трейсы, "
+                              ".json или .json.gz)"},
+    "cli.detect_block": {"en": "find sandwiches in mainnet block N (or 'latest') fetched over --rpc",
+                         "ru": "найти сэндвичи в блоке N мейннета (или 'latest'), загруженном через --rpc"},
+    "cli.detect_count": {"en": "with --detect-block: scan K consecutive blocks ending at that block (default 1)",
+                         "ru": "с --detect-block: просканировать K блоков подряд, заканчивая указанным (по умолчанию 1)"},
+    "cli.save_export": {"en": "with --detect-block: also save the fetched block data to FILE for offline reuse",
+                        "ru": "с --detect-block: сохранить загруженные данные блока в FILE для офлайн-анализа"},
+    "cli.rpc": {"en": "Ethereum JSON-RPC endpoint (default $ETH_RPC_URL)",
+                "ru": "JSON-RPC узел Ethereum (по умолчанию $ETH_RPC_URL)"},
+    "cli.check_swap": {"en": "check a planned swap described in a JSON file: is it sandwichable, what slippage is safe",
+                       "ru": "проверить планируемый своп из JSON-файла: можно ли его засэндвичить и какой "
+                             "слиппедж безопасен"},
+    "cli.check_pool": {"en": "check a planned swap on a live pool ADDRESS (with --rpc, --token-in, --amount-in)",
+                       "ru": "проверить планируемый своп на живом пуле ADDRESS (с --rpc, --token-in, --amount-in)"},
+    "cli.pool_version": {"en": "pool type for --check-pool (default v2)",
+                         "ru": "тип пула для --check-pool (по умолчанию v2)"},
+    "cli.token_in": {"en": "input token address for --check-pool",
+                     "ru": "адрес входного токена для --check-pool"},
+    "cli.amount_in": {"en": "input amount in raw token units for --check-pool",
+                      "ru": "сумма на входе в минимальных единицах токена для --check-pool"},
+    "cli.slippage_bps": {"en": "slippage tolerance you plan to sign, in bps (default 50)",
+                         "ru": "допуск слиппеджа, который вы собираетесь подписать, в б.п. (по умолчанию 50)"},
+    "cli.gas_price": {"en": "attacker gas price in wei for the pre-trade check (default 0 = ignore gas)",
+                      "ru": "цена газа атакующего в wei для проверки свопа (по умолчанию 0 = без учёта газа)"},
+    "cli.eth_price": {"en": "input-token units per 1 ETH, to count gas when the input is not WETH",
+                      "ru": "сколько единиц входного токена стоит 1 ETH, чтобы учесть газ, если вход не WETH"},
+    "guard.advice.safe": {"en": "Not sandwichable at {slippage} bps: no front-run pays for itself.",
+                          "ru": "При {slippage} б.п. своп не засэндвичить: ни один фронтран не окупается."},
+    "guard.advice.unsafe": {"en": "Sandwichable: the best attack nets {profit} (input-token units) and costs you "
+                                  "{loss} of output.",
+                            "ru": "Своп можно засэндвичить: лучшая атака приносит {profit} (в единицах входного "
+                                  "токена), а вы теряете {loss} на выходе."},
+    "guard.advice.lower_slippage": {"en": "Set slippage to {safe} bps or less.",
+                                    "ru": "Поставьте слиппедж не больше {safe} б.п."},
+    "guard.advice.split": {"en": "Or split the trade: up to {size} per swap is safe at this slippage (about {parts} swaps).",
+                           "ru": "Или разбейте сделку: до {size} за своп безопасно при этом слиппедже "
+                                 "(число свопов: примерно {parts})."},
+    "guard.advice.private_rpc": {"en": "Send it through a private RPC (Flashbots Protect, MEV Blocker) so it never "
+                                       "reaches the public mempool.",
+                                 "ru": "Отправьте через приватный RPC (Flashbots Protect, MEV Blocker), чтобы "
+                                       "транзакция не попала в публичный мемпул."},
+    "guard.note.gas_ignored": {"en": "Gas was ignored (input is not WETH and no --eth-price): the answer is conservative.",
+                               "ru": "Газ не учтён (вход не WETH и не задан --eth-price): ответ консервативный."},
+    "guard.note.single_range": {"en": "v3 pool without ticks: active liquidity is assumed to continue past the current "
+                                      "range (exact for swaps that do not cross a tick).",
+                                "ru": "Пул v3 без тиков: активная ликвидность считается неизменной за пределами "
+                                      "текущего диапазона (точно для свопов, не пересекающих тик)."},
     "cli.bot_dir": {"en": "directory for generated bots (default $MEV_SIM_BOT_DIR, else src/simulator/generated_bots)",
                     "ru": "каталог сгенерированных ботов (по умолчанию $MEV_SIM_BOT_DIR, иначе "
                           "src/simulator/generated_bots)"},
